@@ -1,0 +1,261 @@
+@import "tailwindcss";
+
+/* Brand palette: neutral canvas/surface with a blue primary action. */
+@theme {
+  --color-canvas: #FAFAFA;
+  --color-tag: #EFF0F1;
+  --color-divider: #CDD1D5;
+  --color-mention: #505962;
+  --color-ink: #1F2428;
+  --color-action: #0064E0;
+  --color-action-hover: #0052B8;
+}
+
+@layer base {
+  :root {
+    --sb-bg: #FAFAFA;
+    --sb-surface: #EFF0F1;
+    --sb-border: #CDD1D5;
+    --sb-ink: #1F2428;
+    --sb-muted: #505962;
+  }
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--sb-bg);
+    color: var(--sb-ink);
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection {
+    background: #0064E0;
+    color: #fff;
+  }
+}
+
+@layer components {
+  .sb-scroll::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .sb-scroll::-webkit-scrollbar-thumb {
+    background: #CDD1D5;
+    border-radius: 8px;
+  }
+  .sb-scroll::-webkit-scrollbar-thumb:hover {
+    background: #505962;
+  }
+  .sb-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: #CDD1D5 transparent;
+  }
+
+  /* Chat AI responses: marked emits semantic tags at the compact 13.5px
+     scale. Flow spacing matches the old renderer (0.5rem between blocks). */
+  .ai-rich > * + * {
+    margin-top: 0.5rem;
+  }
+  .ai-rich ul {
+    list-style-type: disc;
+    padding-left: 1.25rem;
+  }
+  .ai-rich ol {
+    list-style-type: decimal;
+    padding-left: 1.25rem;
+  }
+  .ai-rich li {
+    margin: 0.15rem 0;
+    line-height: 1.6;
+  }
+  .ai-rich li > ul,
+  .ai-rich li > ol {
+    margin-top: 0.15rem;
+  }
+  .ai-rich h1 {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #1F2428;
+  }
+  .ai-rich h2 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #1F2428;
+  }
+  .ai-rich h3,
+  .ai-rich h4 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #1F2428;
+  }
+  .ai-rich table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .ai-rich th,
+  .ai-rich td {
+    border: 1px solid #CDD1D5;
+    padding: 0.4rem 0.6rem;
+    text-align: left;
+  }
+  .ai-rich th {
+    background: #EFF0F1;
+    color: #1F2428;
+  }
+  .ai-rich blockquote p + p {
+    margin-top: 0.5rem;
+  }
+}
+
+.markdown-preview h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #1F2428;
+  margin-top: 1.25rem;
+  margin-bottom: 0.75rem;
+  border-bottom: 1px solid #CDD1D5;
+  padding-bottom: 0.4rem;
+}
+
+.markdown-preview h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #1F2428;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.markdown-preview h3 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #1F2428;
+  margin-top: 1rem;
+  margin-bottom: 0.4rem;
+}
+
+.markdown-preview p {
+  margin-bottom: 0.75rem;
+  line-height: 1.65;
+  color: #505962;
+}
+
+.markdown-preview ul,
+.markdown-preview ol {
+  margin-left: 1.25rem;
+  margin-bottom: 0.85rem;
+  color: #505962;
+}
+
+.markdown-preview ul {
+  list-style-type: disc;
+}
+
+.markdown-preview ol {
+  list-style-type: decimal;
+}
+
+.markdown-preview li {
+  margin-bottom: 0.35rem;
+  line-height: 1.6;
+}
+
+.markdown-preview strong {
+  color: #1F2428;
+  font-weight: 600;
+}
+
+.markdown-preview code {
+  background: #EFF0F1;
+  color: #1F2428;
+  padding: 0.15rem 0.35rem;
+  border-radius: 0.25rem;
+  font-size: 0.85em;
+}
+
+.markdown-preview pre code {
+  display: block;
+  padding: 0.85rem;
+  overflow-x: auto;
+  color: #1F2428;
+  background: #FAFAFA;
+  border: 1px solid #CDD1D5;
+  border-radius: 0.5rem;
+  margin-bottom: 0.85rem;
+}
+
+/* Summary markdown: same compact scale as the rest of the app
+   (chat text is 13.5px) instead of the larger doc defaults above. */
+.summary-markdown h1 {
+  font-size: 1.05rem;
+  margin-top: 0.75rem;
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.3rem;
+}
+.summary-markdown h2 {
+  font-size: 0.95rem;
+  margin-top: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+.summary-markdown h3 {
+  font-size: 0.875rem;
+  color: #1F2428;
+  margin-top: 0.65rem;
+  margin-bottom: 0.3rem;
+}
+.summary-markdown p,
+.summary-markdown ul,
+.summary-markdown ol {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.summary-markdown li {
+  line-height: 1.6;
+}
+.summary-markdown table {
+  font-size: 12px;
+}
+
+.markdown-preview h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1F2428;
+  margin-top: 0.85rem;
+  margin-bottom: 0.35rem;
+}
+
+.markdown-preview input[type="checkbox"],
+.ai-rich input[type="checkbox"] {
+  accent-color: #0064E0;
+  margin-right: 0.35rem;
+}
+
+.markdown-preview input[type="checkbox"]:not([disabled]),
+.ai-rich input[type="checkbox"]:not([disabled]) {
+  cursor: pointer;
+}
+
+.markdown-preview li:has(> input[type="checkbox"]),
+.ai-rich li:has(> input[type="checkbox"]) {
+  list-style-type: none;
+}
+
+.markdown-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.875rem;
+}
+
+.markdown-preview th,
+.markdown-preview td {
+  border: 1px solid #CDD1D5;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.markdown-preview th {
+  background: #EFF0F1;
+  color: #1F2428;
+}
