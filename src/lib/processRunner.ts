@@ -7,6 +7,7 @@ import {
   entityTextHash,
   saveChatEntities,
   saveChatEntityHashes,
+  stripMarkdownForNer,
 } from "./entities";
 import {
   CATEGORY_LABELS,
@@ -62,6 +63,15 @@ const MICRO_BATCH = 8;
 const CATEGORY_MICRO_BATCH = 16;
 
 /**
+ * Exact text fed to NER for a chat: the classification text with markdown
+ * stripped, so link URLs, code, and emphasis markers never reach the model.
+ * Hashes cover this text — hash what you send.
+ */
+export function buildNerInputText(item: ParsedActivityItem): string {
+  return stripMarkdownForNer(buildEntryClassificationText(item, []));
+}
+
+/**
  * Chats needing (re-)processing, newest first: missing entities, changed
  * text, or a record from an older processor version. Sort is stable, so
  * ties and undated chats keep import order after all dated ones.
@@ -74,7 +84,7 @@ export function buildProcessQueue(
 ): ProcessQueueItem[] {
   const queue: Array<ProcessQueueItem & { ts: string }> = [];
   for (const it of items) {
-    const text = buildEntryClassificationText(it, []);
+    const text = buildNerInputText(it);
     const hash = entityTextHash(text);
     if (
       !chatNeedsProcessing({

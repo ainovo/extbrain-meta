@@ -41,7 +41,7 @@ import {
 } from "../src/lib/urlPreview";
 import { summarizeThreads } from "../src/lib/threads";
 import { inDateRange, taggedChatIds, type TagDef } from "../src/lib/tags";
-import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, isCommonConnective, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
+import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, isCommonConnective, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, stripMarkdownForNer, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
 import {
   buildEntryClassificationText,
   classifySingleTextWithModernBert,
@@ -79,6 +79,7 @@ import {
   type ExportPayload,
 } from "../src/lib/exportData";
 import {
+  buildNerInputText,
   buildProcessQueue,
   buildThreadCategoryQueue,
   processRunner,
@@ -465,22 +466,80 @@ async function runTests() {
       !isCommonConnective(""),
     "isCommonConnective catches standalone connectives, spares real names"
   );
+  assert(
+    stripMarkdownForNer("[Bob](http://x) and `code`") === "Bob and code" &&
+      stripMarkdownForNer("```js\nvar x = 1;\n```") === "" &&
+      stripMarkdownForNer("# Title\n\nBody **bold** end") ===
+        "Title\n\nBody bold end",
+    "stripMarkdownForNer unwraps links/code, drops fences, keeps breaks"
+  );
+  const mdIn = [
+    "# Hello [Bob Iger](https://en.wikipedia.org/wiki/Bob_Iger)",
+    "> quote **bold** and *em* plus __u__ plus ~~gone~~ plus _it_",
+    "- item one",
+    "1. item two",
+    "see https://example.com/a/b for info",
+    "![alt pic](http://x/y.png)",
+    "[ref][1]",
+    "",
+    "[1]: https://example.com",
+    "x Bob_Iger y, a < b, c<br>d",
+  ].join("\n");
+  const mdOut = stripMarkdownForNer(mdIn);
+  assert(
+    mdOut.includes("Hello Bob Iger") &&
+      mdOut.includes("quote bold and em plus u plus gone plus it") &&
+      mdOut.includes("item one") &&
+      mdOut.includes("item two") &&
+      mdOut.includes("see for info") &&
+      mdOut.includes("alt pic") &&
+      mdOut.includes("ref") &&
+      mdOut.includes("Bob_Iger") &&
+      mdOut.includes("a < b") &&
+      mdOut.includes("cd") &&
+      !mdOut.includes("http") &&
+      !mdOut.includes("[") &&
+      !mdOut.includes("**"),
+    "stripMarkdownForNer keeps prose, drops URLs/tags/markers, spares math"
+  );
   // "298-7775. However": a numeric fragment must not anchor across "." onto
   // the next sentence, while a lettered anchor ("MYHOROS") still bridges.
-  const dotGap = { lo: 1, hi: 1, text: ".", type: null, score: 0, glue: true };
+  const dotGap = { lo: 1, hi: 1, text: ".", type: null, score: 0, glue: true, leadSpace: false };
   const numOpen = groupNerWords([
-    { lo: 0, hi: 0, text: "298-7775", type: "PER", score: 0.9, glue: false },
+    { lo: 0, hi: 0, text: "298-7775", type: "PER", score: 0.9, glue: false, leadSpace: false },
     dotGap,
-    { lo: 2, hi: 2, text: "however", type: "PER", score: 0.9, glue: false },
+    { lo: 2, hi: 2, text: "however", type: "PER", score: 0.9, glue: false, leadSpace: false },
   ]);
   const alphaOpen = groupNerWords([
-    { lo: 0, hi: 0, text: "myhoros", type: "ORG", score: 0.9, glue: false },
+    { lo: 0, hi: 0, text: "myhoros", type: "ORG", score: 0.9, glue: false, leadSpace: false },
     dotGap,
-    { lo: 2, hi: 2, text: "com", type: "ORG", score: 0.9, glue: false },
+    { lo: 2, hi: 2, text: "com", type: "ORG", score: 0.9, glue: false, leadSpace: false },
   ]);
   assert(
     numOpen.length === 2 && alphaOpen.length === 1 && alphaOpen[0].hi === 2,
     "punctuation gaps bridge off lettered anchors only"
+  );
+  // Sentence boundaries: a spaced join after .?! splits ("Archana. Because",
+  // "Archana? AI"), abbreviations ("St. Louis") and comma places
+  // ("Sunnyvale, CA") still fuse.
+  const sentSplit = groupNerWords([
+    { lo: 0, hi: 0, text: "archana", type: "PER", score: 0.9, glue: false, leadSpace: false },
+    dotGap,
+    { lo: 2, hi: 2, text: "because", type: "PER", score: 0.9, glue: false, leadSpace: true },
+  ]);
+  const abbrevFuse = groupNerWords([
+    { lo: 0, hi: 0, text: "st", type: "PER", score: 0.9, glue: false, leadSpace: false },
+    dotGap,
+    { lo: 2, hi: 2, text: "louis", type: "PER", score: 0.9, glue: false, leadSpace: true },
+  ]);
+  const commaFuse = groupNerWords([
+    { lo: 0, hi: 0, text: "sunnyvale", type: "LOC", score: 0.9, glue: false, leadSpace: false },
+    { lo: 1, hi: 1, text: ",", type: null, score: 0, glue: true, leadSpace: false },
+    { lo: 2, hi: 2, text: "ca", type: "LOC", score: 0.9, glue: false, leadSpace: true },
+  ]);
+  assert(
+    sentSplit.length === 2 && abbrevFuse.length === 1 && commaFuse.length === 1,
+    "spaced joins after .?! split; abbreviations and comma places fuse"
   );
   const subwordMap: ChatEntityMap = {
     c1: [{ name: "San Fran ##cisco", type: "LOC" }],
@@ -2253,6 +2312,20 @@ async function runTests() {
       .join(",") === "new,mid,old,undated",
     "buildProcessQueue orders pending chats newest first, undated last"
   );
+  // NER reads stripped text and hashes exactly what it sends.
+  const mdItem = {
+    ...procItem("md", "2025-01-01T00:00:00Z"),
+    allPromptsText: "Who is [Bob Iger](https://en.wikipedia.org/wiki/Bob_Iger)?",
+  };
+  const mdQueue = buildProcessQueue([mdItem], {}, {}, null);
+  assert(
+    mdQueue.length === 1 &&
+      mdQueue[0].text === buildNerInputText(mdItem) &&
+      mdQueue[0].text.includes("Bob Iger") &&
+      !mdQueue[0].text.includes("https://") &&
+      mdQueue[0].hash === entityTextHash(buildNerInputText(mdItem)),
+    "NER queue text is markdown-stripped and hashed as sent"
+  );
   const newText = buildEntryClassificationText(procItems[1], []);
   const resumeQueue = buildProcessQueue(
     procItems,
@@ -2776,7 +2849,7 @@ async function runTests() {
     for (const it of procItems) {
       fullMap[it.id] = [{ name: "x", type: "PER", score: 1 }];
       fullHashes[it.id] = {
-        hash: entityTextHash(buildEntryClassificationText(it, [])),
+        hash: entityTextHash(buildNerInputText(it)),
         version: 8,
       };
     }

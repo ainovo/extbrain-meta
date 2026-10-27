@@ -163,11 +163,13 @@ let serverNerLoadingPromise: Promise<any> | null = null;
  * 9 = RoBERTa-large NER with byte-level BPE Ġ word runs,
  * 10 = punctuation gaps bridge only off lettered anchors; standalone
  * sentence connectives ("However") are dropped,
- * 11 = newlines split word runs (section labels no longer fuse into names)).
+ * 11 = newlines split word runs (section labels no longer fuse into names),
+ * 12 = markdown stripped before NER; spaced joins after .?! split as
+ * sentence boundaries (abbreviations excepted)).
  * The Load page stores this per chat alongside its content hash and only
  * reprocesses chats whose record is missing, stale, or from an older version.
  */
-const NER_EXTRACTOR_VERSION = 11;
+const NER_EXTRACTOR_VERSION = 12;
 
 /**
  * Token-classification model for NER (extractor and tokenizer agree). The

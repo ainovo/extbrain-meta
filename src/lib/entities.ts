@@ -167,6 +167,41 @@ export function isCommonConnective(name: string): boolean {
 }
 
 /**
+ * Markdown → plain text for NER input. The extractor must read what a human
+ * reads: link URLs carry Entity_Looking_Slugs the model tags, fenced code is
+ * identifier noise, and emphasis/header/bullet markers pollute spans. Code
+ * fences go entirely; inline code unwraps (identifiers in prose can still
+ * name things); links and images collapse to their text; bare URLs, HTML
+ * tags, and reference definitions are removed. Paragraph breaks survive so
+ * sections never fuse.
+ */
+export function stripMarkdownForNer(text: string): string {
+  let s = text || "";
+  s = s.replace(/```[\s\S]*?```/g, "\n");
+  s = s.replace(/~~~[\s\S]*?~~~/g, "\n");
+  s = s.replace(/`([^`\n]+)`/g, "$1");
+  s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
+  s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+  s = s.replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1");
+  s = s.replace(/^\s*\[[^\]]+\]:\s*\S+.*$/gm, "");
+  s = s.replace(/https?:\/\/\S+/g, "");
+  s = s.replace(/<\/?[a-zA-Z][^<>]*>/g, "");
+  s = s.replace(/^#{1,6}\s+/gm, "");
+  s = s.replace(/^>\s?/gm, "");
+  s = s.replace(/^\s*([-*+]\s+|\d+[.)]\s+)/gm, "");
+  s = s.replace(/^(\*\*\*|---|___)\s*$/gm, "");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+  s = s.replace(/__([^_]+)__/g, "$1");
+  s = s.replace(/~~([^~]+)~~/g, "$1");
+  s = s.replace(/\*([^*\n]+)\*/g, "$1");
+  s = s.replace(/(?<![\w])_([^_\n]+)_(?![\w])/g, "$1");
+  s = s.replace(/[ \t]+/g, " ");
+  s = s.replace(/[ \t]*\n[ \t]*/g, "\n");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  return s.trim();
+}
+
+/**
  * Truncate text to maxLen without cutting mid-word: if the cut lands inside
  * a word, back off to the previous whitespace. Prevents dangling fragments
  * ("...sp" cut from "spending") from becoming phantom entities downstream.
@@ -389,6 +424,8 @@ export interface NerEntityGroup {
   pendingComma: boolean;
   /** True once any fused word holds a letter (gap-bridging needs this). */
   hasLetters: boolean;
+  /** Lowercased text of the last fused word (abbreviation check). */
+  tailText: string;
 }
 
 export interface NerWord {
@@ -396,6 +433,12 @@ export interface NerWord {
   hi: number;
   /** Lowercased joined surfaces, for separator/conjunction checks. */
   text: string;
+  /**
+   * True when the first surface carried a word-start marker (byte-level BPE
+   * only): a marked join means whitespace stood before the word in source.
+   * Always false for WordPiece/markerless runs, which cannot see spacing.
+   */
+  leadSpace: boolean;
   /** Null when no fragment of the word was tagged. */
   type: string | null;
   /**
@@ -580,7 +623,15 @@ export function nerWordRuns(
       .map((w) => (roberta ? stripWordMarker(w) : w))
       .join("")
       .toLowerCase();
-    words.push({ lo: i, hi: j, text, type, score, glue });
+    words.push({
+      lo: i,
+      hi: j,
+      text,
+      type,
+      score,
+      glue,
+      leadSpace: roberta && startsWordMarked(surfaces[i] ?? ""),
+    });
     i = j + 1;
   }
   return words;
@@ -589,15 +640,43 @@ export function nerWordRuns(
 const LIST_SEPS = new Set([",", ";", ":"]);
 
 /**
+ * Abbreviations whose period never ends a sentence ("St. Louis" fuses, but
+ * "Archana. Because" splits). Lowercase, period-free: tail words never
+ * carry the "." itself.
+ */
+const ABBREV_TAILS = new Set([
+  "st",
+  "mr",
+  "mrs",
+  "ms",
+  "dr",
+  "jr",
+  "sr",
+  "vs",
+  "etc",
+  "prof",
+  "rep",
+  "sen",
+  "gov",
+  "gen",
+  "col",
+  "maj",
+  "capt",
+  "lt",
+]);
+
+/**
  * Group same-type tagged words across small punctuation gaps (the "." in
  * "MYHOROS.COM"). An untagged real word always splits the group ("Hi" in
  * "Braden Hi Braden", "and" in "Apple and Microsoft") — coordinations
  * enumerate distinct entities ("Max" / "Alex" / "Teo", "USPS" / "FedEx"),
  * so they must never fuse. The one exception is places, where "City, ST"
  * ("Sunnyvale, CA") is conventionally a single reference. A punctuation gap
- * only bridges when the open span already holds letters: a numeric fragment
- * ("298-7775") must never anchor across "." onto the next sentence's first
- * word ("However"). Word spans are exact, so recovery never fabricates
+ * bridges only off a lettered anchor ("298-7775" never anchors), and only
+ * when the join stays in-sentence: glued continuations ("MYHOROS.COM"),
+ * comma places ("Sunnyvale, CA"), or abbreviation tails ("St. Louis").
+ * A spaced join ("Archana. Because", "Archana? AI") is a sentence boundary
+ * and always splits. Word spans are exact, so recovery never fabricates
  * fragments like "MHOROS" or "funk".
  */
 export function groupNerWords(
@@ -626,18 +705,23 @@ export function groupNerWords(
       }
       continue;
     }
+    // Adjacent words always fuse. A gapped join needs a lettered anchor
+    // plus an in-sentence bridge: a comma place ("Sunnyvale, CA"), a glued
+    // continuation ("MYHOROS.COM"), or an abbreviation tail ("St. Louis").
+    // A spaced join after .?! ("Archana. Because") is a sentence boundary.
+    const gapOk =
+      !open ||
+      open.pendingGap === 0 ||
+      (open.hasLetters &&
+        (open.pendingComma
+          ? open.type === "LOC" && w.text.length <= 3
+          : !w.leadSpace || ABBREV_TAILS.has(open.tailText)));
     if (
       open &&
       open.type === w.type &&
       open.pendingGap <= maxWordGap &&
       open.wordCount + 1 + open.pendingGap <= maxWords &&
-      // A comma-separated tail only belongs to a place when it reads as a
-      // qualifier ("CA"), not another enumeration ("London", "Texas").
-      !(open.pendingComma && (open.type !== "LOC" || w.text.length > 3)) &&
-      // Punctuation gaps bridge only off a lettered anchor: adjacent words
-      // ("50 Cent") always fuse, but "298-7775" must not reach across "."
-      // onto "However".
-      (open.pendingGap === 0 || open.hasLetters)
+      gapOk
     ) {
       open.hi = w.hi;
       open.score =
@@ -646,6 +730,7 @@ export function groupNerWords(
       open.pendingGap = 0;
       open.pendingComma = false;
       open.hasLetters = open.hasLetters || /[\p{L}]/u.test(w.text);
+      open.tailText = w.text;
     } else {
       open = {
         type: w.type,
@@ -656,6 +741,7 @@ export function groupNerWords(
         pendingGap: 0,
         pendingComma: false,
         hasLetters: /[\p{L}]/u.test(w.text),
+        tailText: w.text,
       };
       groups.push(open);
     }
