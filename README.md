@@ -2,6 +2,8 @@
 
 > **The local, anti-RAG cure for AI amnesia.**
 
+> Proudly built 100% by Meta Muse Code for the [Meta Global AI Developer Hackathon](https://cerebralvalley.ai/e/meta-ai-developer-hackathon).
+
 <img width="496" height="596" alt="image" src="https://github.com/user-attachments/assets/8f6370a0-0edb-4cc7-8498-d063ab4a7f53" />
 
 ## The Problem
@@ -46,4 +48,6 @@ npm install
 npm run dev
 ```
 ## License
+Copyright (c) 2026 Ainovo Co.
+
 This project is licensed under the GNU Affero General Public License v3.0 (AGPLv3). See the `LICENSE` file for full details.

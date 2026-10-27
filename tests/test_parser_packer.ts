@@ -37,7 +37,7 @@ import {
 } from "../src/lib/urlPreview";
 import { summarizeThreads } from "../src/lib/threads";
 import { inDateRange, taggedChatIds, type TagDef } from "../src/lib/tags";
-import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityTextHash, filterMentionCandidates, groupNerWords, nerWordRuns, projectTextAlnum, recoverSpanText, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
+import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, nerWordRuns, projectTextAlnum, recoverSpanText, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
 import {
   buildEntryClassificationText,
   classifySingleTextWithModernBert,
@@ -55,6 +55,7 @@ import {
   restoreBackup,
   type ExportPayload,
 } from "../src/lib/exportData";
+import { buildProcessQueue, processRunner } from "../src/lib/processRunner";
 import { loadTags } from "../src/lib/tags";
 import { loadChatEntities } from "../src/lib/entities";
 import { loadCustomThreadTemplates } from "../src/lib/promptTemplates";
@@ -496,6 +497,53 @@ async function runTests() {
       Math.abs(quWord.score - (0.97 + 0.82) / 3) < 1e-9 &&
       Math.abs(soloWord.score - 0.99) < 1e-9,
     "word scores average fragment support: untagged and disagreeing siblings dampen lone votes"
+  );
+
+  // XLM-RoBERTa (markerless BPE) output shape, copied from the real quantized
+  // pipeline: per-id decodes carry no ## markers, so "Ber"+"ke"+"ley" group
+  // by source-text adjacency while "," splits on its punctuation boundary.
+  const spTokens = [
+    { entity: "B-PER", score: 0.9996, index: 4, word: "Clara" },
+    { entity: "I-PER", score: 0.9997, index: 5, word: "Os" },
+    { entity: "I-PER", score: 0.9996, index: 6, word: "wald" },
+    { entity: "B-LOC", score: 0.999, index: 11, word: "Ber" },
+    { entity: "I-LOC", score: 0.9953, index: 12, word: "ke" },
+    { entity: "I-LOC", score: 0.9976, index: 13, word: "ley" },
+    { entity: "B-LOC", score: 0.9995, index: 15, word: "California" },
+  ];
+  const spSurfaces = ["<s>", "My", "name", "is", "Clara", "Os", "wald", "and", "I", "live", "in", "Ber", "ke", "ley", ",", "California", ".", "</s>"];
+  const spSource = "My name is Clara Oswald and I live in Berkeley, California.";
+  const spProj = projectTextAlnum(spSource);
+  const spGroups = groupNerWords(nerWordRuns(spSurfaces, spTokens, spSource));
+  assert(
+    spGroups.length === 3 &&
+      spGroups[0].type === "PER" &&
+      recoverSpanText(spSource, spProj, spSurfaces, spGroups[0].lo, spGroups[0].hi) === "Clara Oswald" &&
+      recoverSpanText(spSource, spProj, spSurfaces, spGroups[1].lo, spGroups[1].hi) === "Berkeley" &&
+      recoverSpanText(spSource, spProj, spSurfaces, spGroups[2].lo, spGroups[2].hi) === "California",
+    "markerless BPE runs recover multi-fragment words: Clara Oswald, Berkeley, California"
+  );
+
+  // Markerless analog of "funko": an untagged mid-word fragment is absorbed
+  // and dampens the word score instead of truncating the span.
+  const spTokens2 = [
+    { entity: "B-LOC", score: 0.99, index: 11, word: "Ber" },
+    { entity: "I-LOC", score: 0.99, index: 13, word: "ley" },
+  ];
+  const spGroups2 = groupNerWords(nerWordRuns(spSurfaces, spTokens2, spSource));
+  const spWord = nerWordRuns(spSurfaces, spTokens2, spSource).find((w) => w.lo === 11)!;
+  assert(
+    spGroups2.length === 1 &&
+      recoverSpanText(spSource, spProj, spSurfaces, spGroups2[0].lo, spGroups2[0].hi) === "Berkeley" &&
+      Math.abs(spWord.score - (0.99 + 0.99) / 3) < 1e-9,
+    "markerless runs absorb untagged mid-word fragments: Berkeley, not Ber"
+  );
+
+  assert(
+    entityTypeLabel("DATE") === "Dates" &&
+      entityTypeRank("DATE") === 4 &&
+      entityTypeRank("ZZZ") === 5,
+    "DATE entities label and rank after the core types"
   );
 
   assert(
@@ -1760,6 +1808,99 @@ async function runTests() {
         .maxTokensPerSynthesisBatch === 1048576,
     "normalizeModelConfig defaults batches to 1M and migrates the legacy 45k default"
   );
+
+  const procItem = (id: string, timestamp: string): ParsedActivityItem => ({
+    id,
+    sourceFile: "f.json",
+    header: "h",
+    title: "t",
+    cleanTitle: "t",
+    timestamp,
+    dateStr: timestamp.slice(0, 16),
+    products: [],
+    turns: [],
+    allPromptsText: `prompt ${id}`,
+    condensedResponseText: "",
+    fullMarkdown: "",
+    extractedEntities: [],
+    estimatedFullTokens: 0,
+    estimatedPackedTokens: 0,
+  });
+  const procItems = [
+    procItem("old", "2024-01-01T00:00:00Z"),
+    procItem("new", "2025-06-01T00:00:00Z"),
+    procItem("mid", "2024-06-01T00:00:00Z"),
+    procItem("undated", ""),
+  ];
+  assert(
+    buildProcessQueue(procItems, {}, {}, null)
+      .map((q) => q.id)
+      .join(",") === "new,mid,old,undated",
+    "buildProcessQueue orders pending chats newest first, undated last"
+  );
+  const newText = buildEntryClassificationText(procItems[1], []);
+  const resumeQueue = buildProcessQueue(
+    procItems,
+    { new: [{ name: "x", type: "PER", score: 1 }] },
+    { new: { hash: entityTextHash(newText), version: 0 } },
+    null
+  );
+  assert(
+    resumeQueue.map((q) => q.id).join(",") === "mid,old,undated",
+    "buildProcessQueue skips chats whose stored record is current"
+  );
+
+  const realFetch = (globalThis as Record<string, unknown>).fetch;
+  (globalThis as Record<string, unknown>).fetch = async () => ({
+    ok: true,
+    json: async () => ({ results: [] }),
+  });
+  const memStore2 = new Map<string, string>();
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: (k: string) => (memStore2.has(k) ? memStore2.get(k)! : null),
+    setItem: (k: string, v: string) => {
+      memStore2.set(k, String(v));
+    },
+    removeItem: (k: string) => {
+      memStore2.delete(k);
+    },
+  };
+  try {
+    const batchSizes: number[] = [];
+    const runnerArgs = {
+      uuid: "u-run",
+      items: procItems,
+      baseMap: {},
+      baseHashes: {},
+      serverVersion: 8,
+      microBatch: 2,
+      onBatch: (merged: ChatEntityMap) => {
+        batchSizes.push(Object.keys(merged).length);
+      },
+    };
+    const first = processRunner.start(runnerArgs);
+    const second = processRunner.start({ ...runnerArgs, onBatch: () => {} });
+    assert(
+      first === true && second === false,
+      "processRunner is single-flight: a second start is refused"
+    );
+    for (let i = 0; i < 200 && processRunner.isRunning(); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const snap = processRunner.getSnapshot();
+    assert(
+      snap.status === "idle" &&
+        snap.error === null &&
+        snap.done === 4 &&
+        snap.total === 4 &&
+        batchSizes.length === 2,
+      "processRunner drains the queue in micro-batches and reports completion"
+    );
+  } finally {
+    processRunner.stop();
+    (globalThis as Record<string, unknown>).fetch = realFetch;
+    delete (globalThis as Record<string, unknown>).localStorage;
+  }
 
   const chunkItem = (id: string, title: string): ParsedActivityItem => ({
     id,

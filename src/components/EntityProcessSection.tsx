@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Play, RotateCcw, Square } from "lucide-react";
 import { ParsedActivityItem } from "../lib/types";
 import { buildEntryClassificationText } from "../lib/retrievalEngine";
+import { ProcessJobSnapshot, processRunner } from "../lib/processRunner";
 import {
   ChatEntityHashMap,
   ChatEntityMap,
@@ -20,8 +21,6 @@ interface Props {
   minScore?: number;
 }
 
-const MICRO_BATCH = 8;
-
 /** NER processing controls: finds people, organizations, and places in chats. */
 export const EntityProcessSection: React.FC<Props> = ({
   uuid,
@@ -30,21 +29,26 @@ export const EntityProcessSection: React.FC<Props> = ({
   onEntitiesChange,
   minScore = 0,
 }) => {
-  const [run, setRun] = useState<{ done: number; total: number } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [job, setJob] = useState<ProcessJobSnapshot>(() =>
+    processRunner.getSnapshot()
+  );
   const [serverVersion, setServerVersion] = useState<number | null>(null);
   const [hashes, setHashes] = useState<ChatEntityHashMap>(() =>
     loadChatEntityHashes(uuid)
   );
-  const abortRef = useRef<AbortController | null>(null);
+  const uuidRef = useRef(uuid);
 
-  // Leaving the page stops the run: otherwise the loop keeps processing
-  // headless and a later "Resume" press would stack a second run over it.
+  // Subscribe to the shared runner: unmounting only unsubscribes, so runs
+  // continue in the background across view switches. A dataset switch stops
+  // the orphaned run so its batches can't land in the wrong dataset's
+  // stores. (The runner is single-flight, so Resume can never stack runs.)
   useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-    };
-  }, []);
+    if (uuidRef.current !== uuid) {
+      uuidRef.current = uuid;
+      processRunner.stop();
+    }
+    return processRunner.subscribe(setJob);
+  }, [uuid]);
 
   useEffect(() => {
     saveChatEntityHashes(uuid, hashes);
@@ -107,98 +111,31 @@ export const EntityProcessSection: React.FC<Props> = ({
     [entityMap, minScore]
   );
 
-  // Chats whose text changed (re-import) or which predate the running
-  // processor version are (re-)processed; unchanged chats keep their entities.
-  const start = async (
+  // The run lives in the shared processRunner (survives view switches);
+  // this section only starts/stops and mirrors progress. Chats whose text
+  // changed (re-import) or which predate the running processor version are
+  // (re-)processed; unchanged chats keep their entities.
+  const start = (
     baseMap: ChatEntityMap = entityMap,
     baseHashes: ChatEntityHashMap = hashes
   ) => {
-    if (run) return;
-    const queue: Array<{ id: string; text: string; hash: string }> = [];
-    for (const it of items) {
-      const text = buildEntryClassificationText(it, []);
-      const hash = entityTextHash(text);
-      if (
-        !chatNeedsProcessing({
-          hasEntities: it.id in baseMap,
-          entry: baseHashes[it.id],
-          hash,
-          serverVersion,
-        })
-      ) {
-        continue;
-      }
-      queue.push({ id: it.id, text, hash });
-    }
-    if (queue.length === 0) {
-      setError(null);
-      return;
-    }
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setRun({ done: 0, total: queue.length });
-    setError(null);
-    try {
-      let merged: ChatEntityMap = { ...baseMap };
-      for (let i = 0; i < queue.length; i += MICRO_BATCH) {
-        if (controller.signal.aborted) {
-          break;
-        }
-        const slice = queue.slice(i, i + MICRO_BATCH);
-        const resp = await fetch("/api/extract-entities-batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: slice }),
-          signal: controller.signal,
-        });
-        if (!resp.ok) {
-          const errData = await resp.json().catch(() => ({}));
-          throw new Error(errData.error || `HTTP ${resp.status}`);
-        }
-        const data = (await resp.json()) as {
-          results: Array<{
-            id: string;
-            entities: Array<{ text: string; label: string; score: number }>;
-          }>;
-        };
-        const batchHashes: ChatEntityHashMap = {};
-        for (const s of slice) {
-          batchHashes[s.id] = {
-            hash: s.hash,
-            version: serverVersion ?? baseHashes[s.id]?.version ?? 0,
-          };
-        }
-        for (const r of data.results || []) {
-          merged[r.id] = (r.entities || []).map((e) => ({
-            name: e.text,
-            type: e.label,
-            score: e.score,
-          }));
-        }
-        merged = { ...merged };
+    processRunner.start({
+      uuid,
+      items,
+      baseMap,
+      baseHashes,
+      serverVersion,
+      onBatch: (merged, batchHashes) => {
         onEntitiesChange(merged);
         setHashes((prev) => ({ ...prev, ...batchHashes }));
-        setRun({
-          done: Math.min(queue.length, i + slice.length),
-          total: queue.length,
-        });
-      }
-    } catch (err: any) {
-      if (controller.signal.aborted || err?.name === "AbortError") {
-        // Stopped by user: keep partial progress, no error.
-      } else {
-        setError(err?.message || String(err));
-      }
-    } finally {
-      setRun(null);
-      abortRef.current = null;
-    }
+      },
+    });
   };
 
-  const stop = () => abortRef.current?.abort();
+  const stop = () => processRunner.stop();
 
   const clearAndRestart = () => {
-    if (run) return;
+    if (job.status === "running") return;
     const ok = window.confirm(
       "Discard all processed entities and reprocess every chat from scratch? " +
         "Use this after a processing upgrade (e.g. fixed entity spellings). " +
@@ -207,11 +144,16 @@ export const EntityProcessSection: React.FC<Props> = ({
     if (!ok) return;
     onEntitiesChange({});
     setHashes({});
-    void start({}, {});
+    start({}, {});
   };
 
+  // A run for another dataset must not drive this section's UI (briefly
+  // possible while a dataset switch stops the orphaned run).
+  const active = job.status === "running" && job.uuid === uuid;
+  const visibleError = job.uuid === uuid ? job.error : null;
+
   const progressPct =
-    run && run.total > 0 ? Math.round((run.done / run.total) * 100) : 0;
+    active && job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
 
   return (
     <div className="space-y-4">
@@ -220,12 +162,13 @@ export const EntityProcessSection: React.FC<Props> = ({
           Process chats
         </h3>
         <p className="text-[13px] text-mention mt-1">
-          Finds people, organizations, and places with bert-base-NER for
-          mention search and highlights.
+          Finds people, organizations, and places with XLM-RoBERTa NER for
+          mention search and highlights. Chats process newest first and keep
+          running when you switch pages.
         </p>
       </div>
 
-      {serverVersion !== null && outdatedCount > 0 && !run && (
+      {serverVersion !== null && outdatedCount > 0 && !active && (
         <div className="rounded-xl border border-divider bg-tag px-4 py-3 text-[13px] text-ink">
           {outdatedCount} {outdatedCount === 1 ? "chat was" : "chats were"}{" "}
           processed with an older version — the current processor (v
@@ -244,7 +187,7 @@ export const EntityProcessSection: React.FC<Props> = ({
 
       <div className="rounded-xl border border-divider bg-canvas p-4">
         <div className="flex items-center gap-3 flex-wrap">
-          {run ? (
+          {active ? (
             <button
               type="button"
               onClick={stop}
@@ -268,7 +211,7 @@ export const EntityProcessSection: React.FC<Props> = ({
                   : "Processing complete"}
             </button>
           )}
-          {processedCount > 0 && !run && (
+          {processedCount > 0 && !active && (
             <button
               type="button"
               onClick={clearAndRestart}
@@ -291,7 +234,7 @@ export const EntityProcessSection: React.FC<Props> = ({
             )}
           </span>
         </div>
-        {run && (
+        {active && (
           <div className="mt-3">
             <div className="h-1.5 rounded-full bg-tag overflow-hidden">
               <div
@@ -300,12 +243,12 @@ export const EntityProcessSection: React.FC<Props> = ({
               />
             </div>
             <div className="mt-1 text-[11px] text-mention font-mono">
-              {run.done}/{run.total} chats ({progressPct}%)
+              {job.done}/{job.total} chats ({progressPct}%)
             </div>
           </div>
         )}
-        {error && (
-          <div className="mt-3 text-[13px] text-ink">Error: {error}</div>
+        {visibleError && (
+          <div className="mt-3 text-[13px] text-ink">Error: {visibleError}</div>
         )}
       </div>
     </div>

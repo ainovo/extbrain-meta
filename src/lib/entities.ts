@@ -235,6 +235,8 @@ export function entityTypeLabel(t: string): string {
       return "Places";
     case "MISC":
       return "Misc";
+    case "DATE":
+      return "Dates";
     default:
       return t || "Misc";
   }
@@ -306,16 +308,64 @@ export interface NerWord {
 }
 
 /**
- * Split the surface list into maximal WordPiece word runs ("Xiao ##yi ##n"
- * is one word, "." is its own word). Each word takes a single type from its
+ * Word-start flags for markerless (SentencePiece/BPE) surfaces, whose
+ * per-id decode carries no continuation marker. Tokens match left-to-right
+ * against the source: a token continues the current word only when it sits
+ * immediately after the previous token with an alphanumeric-to-alphanumeric
+ * boundary ("Ber"+"ke"); anything else — whitespace gaps, punctuation
+ * ("ley"+",") — starts a new word. Unmatchable surfaces degrade to their
+ * own word without moving the cursor, so decode quirks split words instead
+ * of fabricating spans.
+ */
+function markerlessWordStarts(
+  surfaces: string[],
+  source: string
+): boolean[] {
+  const starts = new Array<boolean>(surfaces.length).fill(true);
+  const isAlnum = (ch: string | undefined) =>
+    !!ch && /[\p{L}\p{N}]/u.test(ch);
+  let cursor = 0;
+  let prevEnd = -1;
+  let prevLastAlnum = false;
+  for (let k = 0; k < surfaces.length; k++) {
+    const s = surfaces[k] ?? "";
+    if (!s || SPECIAL_TOKENS.has(s)) continue;
+    while (cursor < source.length && /\s/.test(source[cursor]!)) cursor++;
+    const at = source.startsWith(s, cursor)
+      ? cursor
+      : source.indexOf(s, cursor);
+    if (at < 0) continue;
+    starts[k] = !(
+      prevEnd >= 0 &&
+      at === prevEnd &&
+      prevLastAlnum &&
+      isAlnum(s[0])
+    );
+    cursor = at + s.length;
+    prevEnd = cursor;
+    prevLastAlnum = isAlnum(s[s.length - 1]);
+  }
+  return starts;
+}
+
+/**
+ * Split the surface list into maximal word runs ("Xiao ##yi ##n" is one
+ * word, "." is its own word). Each word takes a single type from its
  * highest-confidence tagged fragment — fragments can never stand alone, so a
  * mid-word type flip from model noise (I-ORG 0.43 inside a PER word) does not
  * split the word. The word score averages support across every fragment, so
  * untagged or disagreeing siblings dampen lone-fragment overconfidence.
+ *
+ * Two fragment schemes are supported. WordPiece surfaces carry ##
+ * continuation markers, so runs extend over them directly. SentencePiece/BPE
+ * per-id decodes carry no markers, so runs group by source-text adjacency
+ * instead and require `sourceText`; without it every token degrades to its
+ * own word.
  */
 export function nerWordRuns(
   surfaces: string[],
-  tokens: NerRawToken[]
+  tokens: NerRawToken[],
+  sourceText?: string
 ): NerWord[] {
   const byIdx = new Map<number, NerRawToken>();
   for (const t of tokens) {
@@ -329,6 +379,11 @@ export function nerWordRuns(
       byIdx.set(t.index, t);
     }
   }
+  // A decoded "##"-prefixed surface can only come from WordPiece, so its
+  // presence selects the fragment scheme for the whole call.
+  const wordPiece = surfaces.some((s) => !!s && s.startsWith("##"));
+  const wordStarts =
+    !wordPiece && sourceText ? markerlessWordStarts(surfaces, sourceText) : null;
   const words: NerWord[] = [];
   const n = surfaces.length;
   let i = 0;
@@ -339,7 +394,9 @@ export function nerWordRuns(
       continue;
     }
     let j = i;
-    if (!s.startsWith("##")) {
+    if (wordStarts) {
+      while (j + 1 < n && !wordStarts[j + 1]) j++;
+    } else if (!s.startsWith("##")) {
       while (j + 1 < n && surfaces[j + 1]?.startsWith("##")) j++;
     }
     let type: string | null = null;
@@ -552,7 +609,18 @@ export function projectTextAlnum(source: string): TextProjection {
   return { folded, map };
 }
 
-const SPECIAL_TOKENS = new Set(["[CLS]", "[SEP]", "[PAD]", "[MASK]", "[UNK]"]);
+const SPECIAL_TOKENS = new Set([
+  "[CLS]",
+  "[SEP]",
+  "[PAD]",
+  "[MASK]",
+  "[UNK]",
+  "<s>",
+  "</s>",
+  "<pad>",
+  "<unk>",
+  "<mask>",
+]);
 
 /**
  * Recover the exact source substring for a token span. The alphanumeric
@@ -627,7 +695,9 @@ export function entityTypeRank(t: string): number {
       return 2;
     case "MISC":
       return 3;
-    default:
+    case "DATE":
       return 4;
+    default:
+      return 5;
   }
 }

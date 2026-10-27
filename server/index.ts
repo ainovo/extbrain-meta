@@ -129,11 +129,12 @@ let serverNerLoadingPromise: Promise<any> | null = null;
  * 4 = list coordination merge + hyphen-joined recovery,
  * 5 = coordinations enumerate distinct entities; only City, ST places merge,
  * 6 = span confidence scores recorded for the Settings score floor,
- * 7 = word scores average fragment support (untagged siblings dampen lone votes)).
+ * 7 = word scores average fragment support (untagged siblings dampen lone votes),
+ * 8 = XLM-RoBERTa NER (quantized ONNX) with markerless word runs + DATE labels).
  * The Load page stores this per chat alongside its content hash and only
  * reprocesses chats whose record is missing, stale, or from an older version.
  */
-const NER_EXTRACTOR_VERSION = 7;
+const NER_EXTRACTOR_VERSION = 8;
 
 async function getServerNerExtractor() {
   if (serverNerExtractor) return serverNerExtractor;
@@ -145,11 +146,11 @@ async function getServerNerExtractor() {
       env.allowLocalModels = false;
       serverNerExtractor = await pipeline(
         "token-classification",
-        "Xenova/bert-base-NER",
+        "tjruesch/xlm-roberta-base-ner-hrl-onnx",
         { dtype: "q8" }
       );
       serverNerTokenizer = await AutoTokenizer.from_pretrained(
-        "Xenova/bert-base-NER"
+        "tjruesch/xlm-roberta-base-ner-hrl-onnx"
       );
       return serverNerExtractor;
     })();
@@ -192,9 +193,11 @@ app.post("/api/extract-entities-batch", async (req, res) => {
       let surfaces: string[] | null = null;
       try {
         const tokOut: any = await tokenizer(text);
+        // Token ids can come back as BigInts (XLM-R uses int64); decode
+        // needs plain numbers.
         const ids: number[] = Array.from(
           tokOut.input_ids?.data ?? tokOut.input_ids ?? []
-        );
+        ).map((v) => Number(v));
         surfaces = ids.map((id) => {
           try {
             return tokenizer.decode([id]);
@@ -210,10 +213,11 @@ app.post("/api/extract-entities-batch", async (req, res) => {
         [];
       if (surfaces) {
         // Word-atomic spans: fragments can never stand alone, so trailing or
-        // mid-word O-tagged pieces ("##o" in "funko", "##n"/"##u" in
-        // "Xiaoyin Qu") are recovered as part of their word instead of being
-        // dropped into fabrications like "funk" or "Xiaoyi Q".
-        for (const g of groupNerWords(nerWordRuns(surfaces, tokens))) {
+        // mid-word O-tagged pieces are recovered as part of their word
+        // instead of being dropped into fabrications. The XLM-R per-id
+        // decodes carry no continuation markers, so words group by
+        // source-text adjacency (nerWordRuns takes the same text).
+        for (const g of groupNerWords(nerWordRuns(surfaces, tokens, text))) {
           const name = recoverSpanText(text, proj, surfaces, g.lo, g.hi);
           if (!name) continue;
           entities.push({ text: name, label: g.type, score: g.score });

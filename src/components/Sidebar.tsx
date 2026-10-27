@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ExtBrainLogo } from "./ExtBrainLogo";
+import { ProcessJobSnapshot, processRunner } from "../lib/processRunner";
 import {
   Upload,
   Tags,
@@ -13,6 +14,7 @@ import {
   Brain,
   ListChecks,
   History,
+  Square,
 } from "lucide-react";
 
 export type SidebarView = "load" | "topics" | "summary" | "settings" | "chat" | "threads" | "top" | "actions";
@@ -53,6 +55,61 @@ const ITEMS: Array<{ id: Exclude<SidebarView, "settings">; label: string; icon: 
   { id: "summary", label: "Summaries", icon: FileText, hint: "Obsidian note" },
   { id: "actions", label: "Action Items", icon: ListChecks, hint: "Tasks from saved summaries" },
 ];
+
+/** Live NER progress + stop, visible on every page while a run continues. */
+function ProcessingIndicator({
+  collapsed,
+  uuid,
+}: {
+  collapsed: boolean;
+  uuid: string;
+}) {
+  const [job, setJob] = useState<ProcessJobSnapshot>(() =>
+    processRunner.getSnapshot()
+  );
+  useEffect(() => processRunner.subscribe(setJob), []);
+  if (job.status !== "running" || job.uuid !== uuid) return null;
+  const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
+  if (collapsed) {
+    return (
+      <div
+        className="px-3 pb-2"
+        title={`Processing chats ${job.done}/${job.total}`}
+      >
+        <div className="h-1.5 rounded-full bg-tag overflow-hidden">
+          <div
+            className="h-full bg-action transition-all"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="mx-2 mb-2 rounded-xl border border-divider bg-tag px-3 py-2">
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] font-medium text-ink flex-1 truncate">
+          Processing {job.done}/{job.total}
+        </span>
+        <button
+          type="button"
+          onClick={() => processRunner.stop()}
+          title="Stop processing"
+          aria-label="Stop processing"
+          className="p-1 rounded-md text-mention hover:text-ink hover:bg-divider/60 transition shrink-0"
+        >
+          <Square className="w-3 h-3" />
+        </button>
+      </div>
+      <div className="mt-1.5 h-1.5 rounded-full bg-divider/50 overflow-hidden">
+        <div
+          className="h-full bg-action transition-all"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
 
 function SidebarBody({
   collapsed,
@@ -206,6 +263,7 @@ function SidebarBody({
 
       {/* Profile + settings pinned to the bottom */}
       <div className="mt-auto p-2 border-t border-divider/70 shrink-0">
+        <ProcessingIndicator collapsed={collapsed} uuid={uuid} />
         {collapsed ? (
           <div className="flex flex-col items-center gap-1.5">
             <button
@@ -263,6 +321,22 @@ function SidebarBody({
             >
               <Settings className="w-4 h-4" />
             </button>
+          </div>
+        )}
+        {!collapsed && (
+          <div className="px-2 pt-1.5 text-center text-[10px] leading-relaxed text-mention/60">
+            Proudly built 100% by Meta Muse Code
+            <br />
+            for{" "}
+            <a
+              href="https://cerebralvalley.ai/e/meta-ai-developer-hackathon"
+              target="_blank"
+              rel="noreferrer"
+              className="underline hover:text-mention"
+            >
+              Meta Global AI Developer Hackathon
+            </a>
+            <br />© 2026 Ainovo Co.
           </div>
         )}
       </div>
