@@ -11,8 +11,10 @@ import {
 } from "../src/lib/types";
 import {
   NerRawToken,
+  cleanEntityText,
   groupNerWords,
   hasNameLetters,
+  isCommonConnective,
   nerWordRuns,
   projectTextAlnum,
   recoverSpanText,
@@ -158,11 +160,14 @@ let serverNerLoadingPromise: Promise<any> | null = null;
  * 6 = span confidence scores recorded for the Settings score floor,
  * 7 = word scores average fragment support (untagged siblings dampen lone votes),
  * 8 = XLM-RoBERTa NER (quantized ONNX) with markerless word runs + DATE labels,
- * 9 = RoBERTa-large NER with byte-level BPE Ġ word runs).
+ * 9 = RoBERTa-large NER with byte-level BPE Ġ word runs,
+ * 10 = punctuation gaps bridge only off lettered anchors; standalone
+ * sentence connectives ("However") are dropped,
+ * 11 = newlines split word runs (section labels no longer fuse into names)).
  * The Load page stores this per chat alongside its content hash and only
  * reprocesses chats whose record is missing, stale, or from an older version.
  */
-const NER_EXTRACTOR_VERSION = 9;
+const NER_EXTRACTOR_VERSION = 11;
 
 /**
  * Token-classification model for NER (extractor and tokenizer agree). The
@@ -278,9 +283,15 @@ app.post("/api/extract-entities-batch", async (req, res) => {
         // carry Ġ word-start markers, which nerWordRuns groups on (it takes
         // the same text for the markerless fallback).
         for (const g of groupNerWords(nerWordRuns(surfaces, tokens, text))) {
-          const name = recoverSpanText(text, proj, surfaces, g.lo, g.hi);
-          // Letter-less spans ("298-7775") are mistags, never names.
-          if (!name || !hasNameLetters(name)) continue;
+          const span = recoverSpanText(text, proj, surfaces, g.lo, g.hi);
+          if (!span) continue;
+          // Bare names only: strip link syntax, then drop letter-less
+          // mistags ("298-7775"), URL-only spans (cleaned to ""), and
+          // standalone connectives ("However").
+          const name = cleanEntityText(span);
+          if (!name || !hasNameLetters(name) || isCommonConnective(name)) {
+            continue;
+          }
           entities.push({ text: name, label: g.type, score: g.score });
         }
       }

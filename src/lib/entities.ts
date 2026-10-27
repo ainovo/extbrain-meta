@@ -45,7 +45,12 @@ export function loadChatEntities(uuid: string): ChatEntityMap {
           type: e?.type || "MISC",
           ...(typeof e?.score === "number" ? { score: e.score } : {}),
         }))
-        .filter((e) => e.name.length >= 2 && hasNameLetters(e.name));
+        .filter(
+          (e) =>
+            e.name.length >= 2 &&
+            hasNameLetters(e.name) &&
+            !isCommonConnective(e.name)
+        );
       cleaned[chatId] = fixed;
     }
     return cleaned;
@@ -84,11 +89,25 @@ export function saveChatEntities(uuid: string, map: ChatEntityMap): boolean {
 }
 
 /**
- * Strip WordPiece "##" continuation markers left behind by the
- * transformers.js NER aggregation ("San Fran ##cisco" -> "San Francisco").
+ * Strip markup residue from recovered spans down to the bare name. NER reads
+ * raw markdown, and span recovery slices exact source text, so names arrive
+ * with link syntax attached ("[Bob Iger](https://...)", "CLI](https://...)").
+ * Full links collapse to their text, orphan "](" tails, bare URLs, and stray
+ * brackets are removed, then WordPiece "##" continuation markers
+ * ("San Fran ##cisco" -> "San Francisco").
  */
 export function cleanEntityText(name: string): string {
-  return name.replace(/\s*##/g, "").replace(/\s+/g, " ").trim();
+  // The \(...\) groups tolerate one nesting level of parens for URLs like
+  // /wiki/X_(disambiguation).
+  return name
+    .replace(/!\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, "$1")
+    .replace(/\]\((?:[^()]|\([^()]*\))*\)/g, "")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/[[\]]/g, "")
+    .replace(/\s*##/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function normalizeEntityKey(name: string): string {
@@ -103,6 +122,48 @@ export function normalizeEntityKey(name: string): string {
  */
 export function hasNameLetters(name: string): boolean {
   return /[\p{L}]/u.test(name || "");
+}
+
+/**
+ * Sentence connectives the model tags when capitalization misleads it
+ * ("However" opening a sentence is not a person). Deliberately tight and
+ * single-word only: ambiguous words that are also real names (Will, Hope,
+ * Bush, Apple) are NOT here, and multi-word spans ("However Smith") pass.
+ */
+const CONNECTIVE_NAMES = new Set([
+  "however",
+  "therefore",
+  "moreover",
+  "furthermore",
+  "nevertheless",
+  "nonetheless",
+  "otherwise",
+  "instead",
+  "meanwhile",
+  "meantime",
+  "accordingly",
+  "consequently",
+  "hence",
+  "thus",
+  "although",
+  "though",
+  "since",
+  "because",
+  "while",
+  "whereas",
+  "also",
+  "and",
+  "but",
+  "or",
+  "yet",
+  "so",
+  "for",
+  "nor",
+]);
+
+export function isCommonConnective(name: string): boolean {
+  const bare = (name || "").trim().toLowerCase();
+  return bare.length > 0 && !/\s/.test(bare) && CONNECTIVE_NAMES.has(bare);
 }
 
 /**
@@ -326,6 +387,8 @@ export interface NerEntityGroup {
   pendingGap: number;
   /** True when the pending gap contains a list separator (",", ";", ":"). */
   pendingComma: boolean;
+  /** True once any fused word holds a letter (gap-bridging needs this). */
+  hasLetters: boolean;
 }
 
 export interface NerWord {
@@ -446,8 +509,16 @@ export function nerWordRuns(
       continue;
     }
     let j = i;
+    // Newlines break runs in every scheme: "Response:\n[Bob" and
+    // "leadership\n\nAI" must split, or section labels fuse into names.
     if (wordStarts) {
-      while (j + 1 < n && !wordStarts[j + 1]) j++;
+      while (
+        j + 1 < n &&
+        !wordStarts[j + 1] &&
+        !hasNewline(surfaces[j + 1] ?? "")
+      ) {
+        j++;
+      }
     } else if (roberta) {
       // Runs break before the next marked word-start (or a special token,
       // which always ends the run); unmarked fragments glue onto the open
@@ -455,12 +526,19 @@ export function nerWordRuns(
       while (
         j + 1 < n &&
         !SPECIAL_TOKENS.has(surfaces[j + 1] ?? "") &&
-        !startsWordMarked(surfaces[j + 1] ?? "")
+        !startsWordMarked(surfaces[j + 1] ?? "") &&
+        !hasNewline(surfaces[j + 1] ?? "")
       ) {
         j++;
       }
     } else if (!s.startsWith("##")) {
-      while (j + 1 < n && surfaces[j + 1]?.startsWith("##")) j++;
+      while (
+        j + 1 < n &&
+        surfaces[j + 1]?.startsWith("##") &&
+        !hasNewline(surfaces[j + 1] ?? "")
+      ) {
+        j++;
+      }
     }
     let type: string | null = null;
     let best = 0;
@@ -516,8 +594,11 @@ const LIST_SEPS = new Set([",", ";", ":"]);
  * "Braden Hi Braden", "and" in "Apple and Microsoft") — coordinations
  * enumerate distinct entities ("Max" / "Alex" / "Teo", "USPS" / "FedEx"),
  * so they must never fuse. The one exception is places, where "City, ST"
- * ("Sunnyvale, CA") is conventionally a single reference. Word spans are
- * exact, so recovery never fabricates fragments like "MHOROS" or "funk".
+ * ("Sunnyvale, CA") is conventionally a single reference. A punctuation gap
+ * only bridges when the open span already holds letters: a numeric fragment
+ * ("298-7775") must never anchor across "." onto the next sentence's first
+ * word ("However"). Word spans are exact, so recovery never fabricates
+ * fragments like "MHOROS" or "funk".
  */
 export function groupNerWords(
   words: NerWord[],
@@ -552,7 +633,11 @@ export function groupNerWords(
       open.wordCount + 1 + open.pendingGap <= maxWords &&
       // A comma-separated tail only belongs to a place when it reads as a
       // qualifier ("CA"), not another enumeration ("London", "Texas").
-      !(open.pendingComma && (open.type !== "LOC" || w.text.length > 3))
+      !(open.pendingComma && (open.type !== "LOC" || w.text.length > 3)) &&
+      // Punctuation gaps bridge only off a lettered anchor: adjacent words
+      // ("50 Cent") always fuse, but "298-7775" must not reach across "."
+      // onto "However".
+      (open.pendingGap === 0 || open.hasLetters)
     ) {
       open.hi = w.hi;
       open.score =
@@ -560,6 +645,7 @@ export function groupNerWords(
       open.wordCount += 1;
       open.pendingGap = 0;
       open.pendingComma = false;
+      open.hasLetters = open.hasLetters || /[\p{L}]/u.test(w.text);
     } else {
       open = {
         type: w.type,
@@ -569,6 +655,7 @@ export function groupNerWords(
         wordCount: 1,
         pendingGap: 0,
         pendingComma: false,
+        hasLetters: /[\p{L}]/u.test(w.text),
       };
       groups.push(open);
     }
@@ -690,6 +777,11 @@ function startsWordMarked(surface: string): boolean {
 
 function stripWordMarker(surface: string): string {
   return startsWordMarked(surface) ? surface.slice(1) : surface;
+}
+
+/** True when a surface carries a line break: words never span lines. */
+function hasNewline(surface: string): boolean {
+  return /[\r\n\t]/.test(surface);
 }
 
 /**

@@ -41,7 +41,7 @@ import {
 } from "../src/lib/urlPreview";
 import { summarizeThreads } from "../src/lib/threads";
 import { inDateRange, taggedChatIds, type TagDef } from "../src/lib/tags";
-import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
+import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, isCommonConnective, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
 import {
   buildEntryClassificationText,
   classifySingleTextWithModernBert,
@@ -432,6 +432,22 @@ async function runTests() {
     "cleanEntityText strips WordPiece ## continuation markers"
   );
   assert(
+    cleanEntityText(
+      "[Bob Iger](https://en.wikipedia.org/wiki/Bob_Iger)"
+    ) === "Bob Iger" &&
+      cleanEntityText(
+        "CLI](https://github.com/Superkikim/nexus-ai-chat-importer-cli/blob/main/README.md)"
+      ) === "CLI" &&
+      cleanEntityText("![pic](http://x/y.png)") === "pic" &&
+      cleanEntityText("see https://example.com/a for info") ===
+        "see for info" &&
+      cleanEntityText(
+        "[X](https://en.wikipedia.org/wiki/X_(disambiguation))"
+      ) === "X" &&
+      cleanEntityText("[stray") === "stray",
+    "cleanEntityText strips markdown links, orphan tails, and bare URLs"
+  );
+  assert(
     !hasNameLetters("298-7775") &&
       !hasNameLetters("...") &&
       !hasNameLetters("") &&
@@ -439,6 +455,32 @@ async function runTests() {
       hasNameLetters("U2") &&
       hasNameLetters("O'Brien"),
     "hasNameLetters keeps names with letters, drops letter-less mistags"
+  );
+  assert(
+    isCommonConnective("However") &&
+      isCommonConnective("however") &&
+      !isCommonConnective("However Smith") &&
+      !isCommonConnective("Will") &&
+      !isCommonConnective("Hope") &&
+      !isCommonConnective(""),
+    "isCommonConnective catches standalone connectives, spares real names"
+  );
+  // "298-7775. However": a numeric fragment must not anchor across "." onto
+  // the next sentence, while a lettered anchor ("MYHOROS") still bridges.
+  const dotGap = { lo: 1, hi: 1, text: ".", type: null, score: 0, glue: true };
+  const numOpen = groupNerWords([
+    { lo: 0, hi: 0, text: "298-7775", type: "PER", score: 0.9, glue: false },
+    dotGap,
+    { lo: 2, hi: 2, text: "however", type: "PER", score: 0.9, glue: false },
+  ]);
+  const alphaOpen = groupNerWords([
+    { lo: 0, hi: 0, text: "myhoros", type: "ORG", score: 0.9, glue: false },
+    dotGap,
+    { lo: 2, hi: 2, text: "com", type: "ORG", score: 0.9, glue: false },
+  ]);
+  assert(
+    numOpen.length === 2 && alphaOpen.length === 1 && alphaOpen[0].hi === 2,
+    "punctuation gaps bridge off lettered anchors only"
   );
   const subwordMap: ChatEntityMap = {
     c1: [{ name: "San Fran ##cisco", type: "LOC" }],
@@ -671,6 +713,29 @@ async function runTests() {
       recoverSpanText(rbSource, rbProj, rbRawSurfaces, 1, 2) ===
         "Clara Oswald",
     "RoBERTa raw Ġ markers group identically to decoded spaces"
+  );
+  // Newlines split runs: "Response:\n[Bob Iger" must not fuse the section
+  // label into the name (stored "Response: Bob Iger" hides the entity).
+  const nlSource = "Response:\n[Bob Iger]";
+  const nlSurfaces = ["<s>", "Response:", "\n", "[Bob", " Iger", "</s>"];
+  const nlTokens = [
+    { entity: "PER", score: 0.99, index: 3, word: "[Bob" },
+    { entity: "PER", score: 0.99, index: 4, word: " Iger" },
+  ];
+  const nlWords = nerWordRuns(nlSurfaces, nlTokens, nlSource);
+  const nlGroups = groupNerWords(nlWords);
+  assert(
+    nlWords.length === 3 &&
+      nlGroups.length === 1 &&
+      nlGroups[0].lo === 2 &&
+      recoverSpanText(
+        nlSource,
+        projectTextAlnum(nlSource),
+        nlSurfaces,
+        nlGroups[0].lo,
+        nlGroups[0].hi
+      ) === "Bob Iger",
+    "newlines split word runs: Bob Iger recovers without its label"
   );
   // Single-word texts carry no Ġ at all: grouping falls back to
   // source-text adjacency instead of degrading.
@@ -2575,6 +2640,15 @@ async function runTests() {
         noiseLoaded.noisy.length === 0 &&
         noiseLoaded.fine.length === 1,
       "entity store drops letter-less mistags at load, keeps real names"
+    );
+    saveChatEntities("uu", {
+      conn: [{ name: "However", type: "PER" }],
+      name: [{ name: "Will", type: "PER" }],
+    });
+    const connLoaded = loadChatEntities("uu");
+    assert(
+      connLoaded.conn.length === 0 && connLoaded.name.length === 1,
+      "entity store drops standalone connectives at load, keeps names"
     );
   } finally {
     delete (globalThis as Record<string, unknown>).localStorage;
