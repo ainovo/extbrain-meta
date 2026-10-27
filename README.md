@@ -34,7 +34,7 @@ Instead of chunking text and using vector similarities to guess relevance, ExtBr
 *   **Meta RoBERTa (On-Device):** Utilizes an on-device Meta NLI classifier to extract entities directly from raw messages. 
 *   **Cloud NER Option:** Provides an option to connect to cloud-based Named Entity Recognition (NER) services to expedite processing for massive chat repositories.
 *   **Meta Muse Models:** Leverages Meta Muse models for highly accurate summarization and synthesis.
-*   **Bring-Your-Own-Key (BYOK):** Full flexibility to plug in your preferred model keys.
+*   **Bring-Your-Own-Key (BYOK):** Full flexibility to plug in your Meta model keys.
 
 ## Getting Started
 
