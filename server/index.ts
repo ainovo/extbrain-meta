@@ -10,6 +10,7 @@ import {
   ModelEndpointConfig,
 } from "../src/lib/types";
 import {
+  MAX_ENTITY_NAME_CHARS,
   NerRawToken,
   cleanEntityText,
   groupNerWords,
@@ -165,11 +166,12 @@ let serverNerLoadingPromise: Promise<any> | null = null;
  * sentence connectives ("However") are dropped,
  * 11 = newlines split word runs (section labels no longer fuse into names),
  * 12 = markdown stripped before NER; spaced joins after .?! split as
- * sentence boundaries (abbreviations excepted)).
+ * sentence boundaries (abbreviations excepted),
+ * 13 = JSON blobs and UUIDs stripped before NER; names capped at 120 chars).
  * The Load page stores this per chat alongside its content hash and only
  * reprocesses chats whose record is missing, stale, or from an older version.
  */
-const NER_EXTRACTOR_VERSION = 12;
+const NER_EXTRACTOR_VERSION = 13;
 
 /**
  * Token-classification model for NER (extractor and tokenizer agree). The
@@ -288,10 +290,15 @@ app.post("/api/extract-entities-batch", async (req, res) => {
           const span = recoverSpanText(text, proj, surfaces, g.lo, g.hi);
           if (!span) continue;
           // Bare names only: strip link syntax, then drop letter-less
-          // mistags ("298-7775"), URL-only spans (cleaned to ""), and
-          // standalone connectives ("However").
+          // mistags ("298-7775"), URL-only spans (cleaned to ""),
+          // standalone connectives ("However"), and fused-blob monsters.
           const name = cleanEntityText(span);
-          if (!name || !hasNameLetters(name) || isCommonConnective(name)) {
+          if (
+            !name ||
+            name.length > MAX_ENTITY_NAME_CHARS ||
+            !hasNameLetters(name) ||
+            isCommonConnective(name)
+          ) {
             continue;
           }
           entities.push({ text: name, label: g.type, score: g.score });

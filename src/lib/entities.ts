@@ -48,6 +48,7 @@ export function loadChatEntities(uuid: string): ChatEntityMap {
         .filter(
           (e) =>
             e.name.length >= 2 &&
+            e.name.length <= MAX_ENTITY_NAME_CHARS &&
             hasNameLetters(e.name) &&
             !isCommonConnective(e.name)
         );
@@ -192,10 +193,83 @@ export function isCommonConnective(name: string): boolean {
  * tags, and reference definitions are removed. Paragraph breaks survive so
  * sections never fuse.
  */
+/**
+ * Longest plausible entity name. Recovery can fuse spaceless blobs (inline
+ * JSON has no word breaks) into hundred-character "names"; nothing legit
+ * comes close — the longest place names run under 90 characters.
+ */
+export const MAX_ENTITY_NAME_CHARS = 120;
+
+/** Match the bracket closing text[open] (nesting- and string-aware). */
+function matchBracketEnd(text: string, open: number): number {
+  const pairs: Record<string, string> = { "{": "}", "[": "]" };
+  const stack: string[] = [];
+  let quote: string | null = null;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      stack.push(ch);
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      const want = pairs[stack.pop() ?? ""];
+      if (ch !== want) return -1;
+      if (stack.length === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** True when a balanced span reads as data (quoted keys, JSON literals). */
+function looksLikeJsonObject(span: string): boolean {
+  return (
+    /"[^"\n]{1,60}"\s*:/.test(span) ||
+    /'[^'\n]{1,60}'\s*:/.test(span) ||
+    /:\s*(true|false|null|-?\d)/.test(span)
+  );
+}
+
+/**
+ * Remove balanced {...} / [...] data blobs. Inline JSON (tool outputs,
+ * pasted configs) is rarely fenced, and spaceless blobs fuse into single
+ * monster "words"; prose brackets ("[see appendix]") lack key syntax and
+ * survive. Unbalanced truncations are left for the length cap downstream.
+ */
+export function stripJsonBlobs(text: string): string {
+  const src = text || "";
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === "{" || ch === "[") {
+      const end = matchBracketEnd(src, i);
+      if (end > i && looksLikeJsonObject(src.slice(i, end + 1))) {
+        out += "\n";
+        i = end + 1;
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
 export function stripMarkdownForNer(text: string): string {
   let s = text || "";
   s = s.replace(/```[\s\S]*?```/g, "\n");
   s = s.replace(/~~~[\s\S]*?~~~/g, "\n");
+  s = stripJsonBlobs(s);
+  s = s.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, " ");
   s = s.replace(/`([^`\n]+)`/g, "$1");
   s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
   s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");

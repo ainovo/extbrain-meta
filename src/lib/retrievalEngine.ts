@@ -29,8 +29,10 @@ export function buildEntryClassificationText(
     .join("\n\n")
     .trim();
 
+  // Role labels read as plain common nouns: "AI Response:" got tagged as
+  // an ORG in every chat, polluting all mention lists.
   if (fullResp.length <= 1350) {
-    return `User Prompt:\n${promptPart}\n\nAI Response:\n${fullResp}`.trim();
+    return `Question:\n${promptPart}\n\nAnswer:\n${fullResp}`.trim();
   }
 
   const paragraphs = fullResp
@@ -57,7 +59,7 @@ export function buildEntryClassificationText(
     }
   }
 
-  return `User Prompt:\n${promptPart}\n\nAI Response:\n${picked
+  return `Question:\n${promptPart}\n\nAnswer:\n${picked
     .join("\n")
     .slice(0, 1400)}`.trim();
 }

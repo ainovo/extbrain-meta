@@ -41,7 +41,7 @@ import {
 } from "../src/lib/urlPreview";
 import { summarizeThreads } from "../src/lib/threads";
 import { inDateRange, taggedChatIds, type TagDef } from "../src/lib/tags";
-import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, isCommonConnective, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, stripMarkdownForNer, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
+import { MAX_ENTITY_NAME_CHARS, aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, isCommonConnective, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, stripJsonBlobs, stripMarkdownForNer, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
 import {
   buildEntryClassificationText,
   classifySingleTextWithModernBert,
@@ -513,6 +513,23 @@ async function runTests() {
     "[1]: https://example.com",
     "x Bob_Iger y, a < b, c<br>d",
   ].join("\n");
+  assert(
+    stripJsonBlobs('run {"target":"BROWSER","retry":3,"tags":["a","b"]} now') ===
+      "run \n now" &&
+      stripJsonBlobs('{"a{b}c":"x}","n":{"m":[1,{"k":null}]}} tail') ===
+        "\n tail" &&
+      stripJsonBlobs("{'a': 1, 'b': 'x'} tail") === "\n tail" &&
+      stripJsonBlobs("[see appendix] and {note here} stay") ===
+        "[see appendix] and {note here} stay" &&
+      stripJsonBlobs('truncated {"a": 1, "b":') === 'truncated {"a": 1, "b":',
+    "stripJsonBlobs removes nested data, keeps prose and truncations"
+  );
+  assert(
+    !stripMarkdownForNer(
+      "id 2138349d-d845-424d-85bc-171ea13c4df2 done"
+    ).includes("2138349d"),
+    "stripMarkdownForNer removes UUIDs"
+  );
   const mdOut = stripMarkdownForNer(mdIn);
   assert(
     mdOut.includes("Hello Bob Iger") &&
@@ -2365,6 +2382,11 @@ async function runTests() {
       mdQueue[0].hash === entityTextHash(buildNerInputText(mdItem)),
     "NER queue text is markdown-stripped and hashed as sent"
   );
+  assert(
+    buildNerInputText(mdItem).startsWith("Question:") &&
+      !buildNerInputText(mdItem).includes("AI Response:"),
+    "NER role labels read as common nouns, never as entities"
+  );
   const newText = buildEntryClassificationText(procItems[1], []);
   const resumeQueue = buildProcessQueue(
     procItems,
@@ -2761,6 +2783,16 @@ async function runTests() {
     assert(
       connLoaded.conn.length === 0 && connLoaded.name.length === 1,
       "entity store drops standalone connectives at load, keeps names"
+    );
+    const longOk = "x".repeat(MAX_ENTITY_NAME_CHARS - 2) + "yz";
+    saveChatEntities("uu", {
+      blob: [{ name: `{"a":"${"z".repeat(200)}"}`, type: "LOC" }],
+      edge: [{ name: longOk, type: "PER" }],
+    });
+    const lenLoaded = loadChatEntities("uu");
+    assert(
+      lenLoaded.blob.length === 0 && lenLoaded.edge.length === 1,
+      "entity store drops over-long fused spans at load, keeps the cap edge"
     );
   } finally {
     delete (globalThis as Record<string, unknown>).localStorage;
