@@ -1,4 +1,4 @@
-# ExtBrain 🧠
+# ExtBrain <img align="right" width="120" src="./public/extbrain.svg" alt="ExtBrain Logo">
 
 > **The local, anti-RAG cure for AI amnesia.**
 
