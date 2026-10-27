@@ -155,11 +155,15 @@ let serverNerLoadingPromise: Promise<any> | null = null;
  * 5 = coordinations enumerate distinct entities; only City, ST places merge,
  * 6 = span confidence scores recorded for the Settings score floor,
  * 7 = word scores average fragment support (untagged siblings dampen lone votes),
- * 8 = XLM-RoBERTa NER (quantized ONNX) with markerless word runs + DATE labels).
+ * 8 = XLM-RoBERTa NER (quantized ONNX) with markerless word runs + DATE labels,
+ * 9 = RoBERTa-large NER with byte-level BPE Ġ word runs).
  * The Load page stores this per chat alongside its content hash and only
  * reprocesses chats whose record is missing, stale, or from an older version.
  */
-const NER_EXTRACTOR_VERSION = 8;
+const NER_EXTRACTOR_VERSION = 9;
+
+/** Token-classification model for NER (extractor and tokenizer agree). */
+const NER_MODEL_ID = "Jean-Baptiste/roberta-large-ner-english";
 
 async function getServerNerExtractor() {
   if (serverNerExtractor) return serverNerExtractor;
@@ -169,14 +173,25 @@ async function getServerNerExtractor() {
         "@huggingface/transformers"
       );
       env.allowLocalModels = false;
-      serverNerExtractor = await pipeline(
-        "token-classification",
-        "tjruesch/xlm-roberta-base-ner-hrl-onnx",
-        { dtype: "q8" }
-      );
-      serverNerTokenizer = await AutoTokenizer.from_pretrained(
-        "tjruesch/xlm-roberta-base-ner-hrl-onnx"
-      );
+      try {
+        serverNerExtractor = await pipeline(
+          "token-classification",
+          NER_MODEL_ID,
+          { dtype: "q8" }
+        );
+      } catch (err) {
+        // No quantized weights published (or a transient download failure):
+        // fall back to full precision rather than failing all NER.
+        console.warn(
+          `[ner] quantized load failed for ${NER_MODEL_ID}, retrying full precision:`,
+          err instanceof Error ? err.message : err
+        );
+        serverNerExtractor = await pipeline(
+          "token-classification",
+          NER_MODEL_ID
+        );
+      }
+      serverNerTokenizer = await AutoTokenizer.from_pretrained(NER_MODEL_ID);
       return serverNerExtractor;
     })();
   }
@@ -218,8 +233,8 @@ app.post("/api/extract-entities-batch", async (req, res) => {
       let surfaces: string[] | null = null;
       try {
         const tokOut: any = await tokenizer(text);
-        // Token ids can come back as BigInts (XLM-R uses int64); decode
-        // needs plain numbers.
+        // Token ids can come back as BigInts (the tokenizer uses int64);
+        // decode needs plain numbers.
         const ids: number[] = Array.from(
           tokOut.input_ids?.data ?? tokOut.input_ids ?? []
         ).map((v) => Number(v));
@@ -239,9 +254,9 @@ app.post("/api/extract-entities-batch", async (req, res) => {
       if (surfaces) {
         // Word-atomic spans: fragments can never stand alone, so trailing or
         // mid-word O-tagged pieces are recovered as part of their word
-        // instead of being dropped into fabrications. The XLM-R per-id
-        // decodes carry no continuation markers, so words group by
-        // source-text adjacency (nerWordRuns takes the same text).
+        // instead of being dropped into fabrications. RoBERTa per-id decodes
+        // carry Ġ word-start markers, which nerWordRuns groups on (it takes
+        // the same text for the markerless fallback).
         for (const g of groupNerWords(nerWordRuns(surfaces, tokens, text))) {
           const name = recoverSpanText(text, proj, surfaces, g.lo, g.hi);
           if (!name) continue;

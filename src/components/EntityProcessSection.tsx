@@ -230,7 +230,7 @@ export const EntityProcessSection: React.FC<Props> = ({
           Process chats
         </h3>
         <p className="text-[13px] text-mention mt-1">
-          Finds people, organizations, and places with XLM-RoBERTa NER for
+          Finds people, organizations, and places with RoBERTa-large NER for
           mention search and highlights, then tags each thread with one of
           8 categories for Top Threads. Newest first, keeps running when
           you switch pages.

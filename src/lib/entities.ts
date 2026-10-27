@@ -385,11 +385,12 @@ function markerlessWordStarts(
  * split the word. The word score averages support across every fragment, so
  * untagged or disagreeing siblings dampen lone-fragment overconfidence.
  *
- * Two fragment schemes are supported. WordPiece surfaces carry ##
- * continuation markers, so runs extend over them directly. SentencePiece/BPE
- * per-id decodes carry no markers, so runs group by source-text adjacency
- * instead and require `sourceText`; without it every token degrades to its
- * own word.
+ * Three fragment schemes are supported. WordPiece surfaces carry ##
+ * continuation markers, so runs extend over them directly. Byte-level BPE
+ * (RoBERTa) surfaces carry a Ġ word-START marker, so runs break before it.
+ * Markerless per-id decodes (XLM-R SentencePiece) group by source-text
+ * adjacency instead and require `sourceText`; without it every token
+ * degrades to its own word.
  */
 export function nerWordRuns(
   surfaces: string[],
@@ -411,8 +412,17 @@ export function nerWordRuns(
   // A decoded "##"-prefixed surface can only come from WordPiece, so its
   // presence selects the fragment scheme for the whole call.
   const wordPiece = surfaces.some((s) => !!s && s.startsWith("##"));
+  // A Ġ-prefixed surface can only come from byte-level BPE (RoBERTa/GPT-2),
+  // where Ġ marks word starts. Every word but (possibly) the text-initial
+  // one carries it, so its absence (single-word texts) falls back to
+  // source-text adjacency below.
+  const roberta = surfaces.some(
+    (s) => !!s && s.startsWith(ROBERTA_WORD_MARKER)
+  );
   const wordStarts =
-    !wordPiece && sourceText ? markerlessWordStarts(surfaces, sourceText) : null;
+    !wordPiece && !roberta && sourceText
+      ? markerlessWordStarts(surfaces, sourceText)
+      : null;
   const words: NerWord[] = [];
   const n = surfaces.length;
   let i = 0;
@@ -425,6 +435,16 @@ export function nerWordRuns(
     let j = i;
     if (wordStarts) {
       while (j + 1 < n && !wordStarts[j + 1]) j++;
+    } else if (roberta) {
+      // Runs break before the next Ġ word-start (or a special token, which
+      // always ends the run); unmarked fragments glue onto the open word.
+      while (
+        j + 1 < n &&
+        !SPECIAL_TOKENS.has(surfaces[j + 1] ?? "") &&
+        !surfaces[j + 1]?.startsWith(ROBERTA_WORD_MARKER)
+      ) {
+        j++;
+      }
     } else if (!s.startsWith("##")) {
       while (j + 1 < n && surfaces[j + 1]?.startsWith("##")) j++;
     }
@@ -434,8 +454,12 @@ export function nerWordRuns(
     const frags: Array<{ type: string | null; score: number }> = [];
     for (let k = i; k <= j; k++) {
       const surf = surfaces[k] ?? "";
+      // Ġ is \p{L}, so a bare space-marker would read as a real word unless
+      // stripped before the alphanumeric scan.
+      const bare =
+        roberta && surf.startsWith(ROBERTA_WORD_MARKER) ? surf.slice(1) : surf;
       if (!surf.startsWith("##") && !SPECIAL_TOKENS.has(surf)) {
-        for (const ch of surf) {
+        for (const ch of bare) {
           if (/[\p{L}\p{N}]/u.test(ch)) {
             glue = false;
             break;
@@ -462,6 +486,9 @@ export function nerWordRuns(
           frags.length;
     const text = surfaces
       .slice(i, j + 1)
+      .map((w) =>
+        roberta && w.startsWith(ROBERTA_WORD_MARKER) ? w.slice(1) : w
+      )
       .join("")
       .toLowerCase();
     words.push({ lo: i, hi: j, text, type, score, glue });
@@ -638,6 +665,13 @@ export function projectTextAlnum(source: string): TextProjection {
   return { folded, map };
 }
 
+/**
+ * Byte-level BPE word-start marker (RoBERTa/GPT-2 per-id decodes look like
+ * "Ġhello"). It matches \p{L}, so every alphanumeric scan must strip it
+ * first or "Ġ..." fragments pollute needles and glue checks.
+ */
+const ROBERTA_WORD_MARKER = "Ġ";
+
 const SPECIAL_TOKENS = new Set([
   "[CLS]",
   "[SEP]",
@@ -671,6 +705,7 @@ export function recoverSpanText(
     let s = surfaces[i];
     if (!s || SPECIAL_TOKENS.has(s)) continue;
     if (s.startsWith("##")) s = s.slice(2);
+    if (s.startsWith(ROBERTA_WORD_MARKER)) s = s.slice(1);
     for (const ch of s) {
       if (/[\p{L}\p{N}]/u.test(ch)) needle += ch.toLowerCase();
     }
