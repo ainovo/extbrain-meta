@@ -161,7 +161,10 @@ export const GRANULARITY_LABEL: Record<RangeGranularity, string> = {
 /**
  * Activity buckets for an explicit day range (inclusive, oldest first). The
  * bucket size adapts so the chart never exceeds ~31 bars; days merge from
- * the oldest day, so the live edge stays exact.
+ * the oldest day, so the live edge stays exact. Chats sum across merged
+ * days (each chat sits in exactly one day), while threads union: a thread
+ * active on several days of one bucket counts once, so every "threads"
+ * number is a distinct-thread count.
  */
 export function buildRangeStats(
   items: ParsedActivityItem[],
@@ -177,7 +180,11 @@ export function buildRangeStats(
     Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
   const count = Math.max(1, Math.min(spanDays, 3660));
   const endNoon = new Date(end.getFullYear(), end.getMonth(), end.getDate(), 12);
-  const daily = buildDailyStats(items, endNoon, count);
+  const { stats: daily, dayThreads, threadSource } = buildDailyDetails(
+    items,
+    endNoon,
+    count
+  );
   const toBucket = (d: DailyStat): RangeBucket => ({
     key: d.key,
     start: d.date,
@@ -201,15 +208,21 @@ export function buildRangeStats(
     const chats = zeroSources();
     const threads = zeroSources();
     let totalChats = 0;
-    let totalThreads = 0;
+    // Union, not sum: a thread active on N days of this bucket is one
+    // thread active in the bucket, not N.
+    const seenThreads = new Set<string>();
     for (const d of group) {
       for (const s of IMPORT_SOURCES) {
         chats[s] += d.chatsBySource[s];
-        threads[s] += d.threadsBySource[s];
       }
       totalChats += d.totalChats;
-      totalThreads += d.totalThreads;
+      for (const key of dayThreads.get(d.key) ?? []) {
+        if (seenThreads.has(key)) continue;
+        seenThreads.add(key);
+        threads[threadSource.get(key) ?? "Other"] += 1;
+      }
     }
+    const totalThreads = seenThreads.size;
     merged.push({
       key: first.key,
       start: first.date,
@@ -243,6 +256,23 @@ export function buildDailyStats(
   now = new Date(),
   days = TOP_OF_MIND_DAYS
 ): DailyStat[] {
+  return buildDailyDetails(items, now, days).stats;
+}
+
+interface DailyDetails {
+  stats: DailyStat[];
+  /** Distinct thread keys active per day key. */
+  dayThreads: Map<string, Set<string>>;
+  /** Thread key → source of its earliest chat (whole history). */
+  threadSource: Map<string, ImportSource>;
+}
+
+/** Daily stats plus the thread identity behind the counts (for merging). */
+function buildDailyDetails(
+  items: ParsedActivityItem[],
+  now: Date,
+  days: number
+): DailyDetails {
   const buckets = new Map<string, DailyStat>();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   for (let i = days - 1; i >= 0; i--) {
@@ -303,7 +333,26 @@ export function buildDailyStats(
       bucket.totalThreads += 1;
     }
   }
-  return [...buckets.values()];
+  return { stats: [...buckets.values()], dayThreads, threadSource };
+}
+
+/**
+ * Distinct threads per import source over whole thread summaries. A thread
+ * is attributed to its oldest chat (summaries sort chats oldest-first),
+ * matching the earliest-chat rule in buildDailyStats. The counts sum to
+ * summaries.length, so the Threads-mode legend reconciles with the range
+ * subtitle — unlike per-bucket sums, where a thread active in two buckets
+ * would count twice.
+ */
+export function countThreadsBySource(
+  summaries: ThreadSummary[]
+): Record<ImportSource, number> {
+  const counts = zeroSources();
+  for (const t of summaries) {
+    const first = t.chats[0];
+    counts[first ? sourceOfItem(first) : "Other"] += 1;
+  }
+  return counts;
 }
 
 /** First-to-last-chat span of a thread in milliseconds (0 when unknown). */

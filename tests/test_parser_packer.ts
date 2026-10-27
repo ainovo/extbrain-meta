@@ -15,9 +15,11 @@ import {
   toggleActionItemInMarkdown,
 } from "../src/lib/actionItems";
 import {
+  IMPORT_SOURCES,
   bucketDayKeys,
   buildDailyStats,
   buildRangeStats,
+  countThreadsBySource,
   dataDayBounds,
   filterItemsByRange,
   formatDayRangeLabel,
@@ -1102,6 +1104,44 @@ async function runTests() {
       wide.buckets.reduce((n, b) => n + b.totalChats, 0) === 3,
     "buildRangeStats coarsens very long ranges to keep bars readable"
   );
+  // thread-dupe is active Oct 20 AND Oct 21 (same week bucket): the merged
+  // bucket must count it once while both chats still sum.
+  const dupeItems = [
+    mkItem("d1", isoDaysAgo(4), "thread-dupe", "ChatGPT", "day one"),
+    mkItem("d2", isoDaysAgo(3), "thread-dupe", "ChatGPT", "day two"),
+    mkItem("d3", isoDaysAgo(3), "thread-solo", "Gemini Apps", "other"),
+  ];
+  const merged = buildRangeStats(dupeItems, "2026-09-14", "2026-10-24");
+  const dupeBucket = merged.buckets.find((b) => {
+    const { startKey, endKey } = bucketDayKeys(b);
+    return startKey <= "2026-10-20" && endKey >= "2026-10-21";
+  });
+  assert(
+    merged.granularity === "week" &&
+      dupeBucket !== undefined &&
+      dupeBucket.totalChats === 3 &&
+      dupeBucket.totalThreads === 2 &&
+      dupeBucket.threadsBySource.ChatGPT === 1 &&
+      dupeBucket.threadsBySource.Gemini === 1,
+    "buildRangeStats unions threads on merge: a two-day thread counts once per bucket while chats sum"
+  );
+  // thread-cross starts in ChatGPT and continues in Gemini: the legend
+  // attributes it once (oldest chat) and sums to the thread count.
+  const legendItems = [
+    mkItem("l1", isoDaysAgo(10), "thread-cross", "ChatGPT", "starts here"),
+    mkItem("l2", isoDaysAgo(1), "thread-cross", "Gemini Apps", "continues"),
+    mkItem("l3", isoDaysAgo(0), "thread-g", "Gemini Apps", "gemini only"),
+  ];
+  const legendSums = summarizeThreads(legendItems);
+  const legendCounts = countThreadsBySource(legendSums);
+  assert(
+    legendSums.length === 2 &&
+      legendCounts.ChatGPT === 1 &&
+      legendCounts.Gemini === 1 &&
+      IMPORT_SOURCES.reduce((n, s) => n + legendCounts[s], 0) ===
+        legendSums.length,
+    "countThreadsBySource counts each thread once under its oldest chat so the legend reconciles with the subtitle"
+  );
 
   const spanItems = [
     mkItem("span-old", isoDaysAgo(60), "thread-span", "ChatGPT", "very first"),
@@ -1901,6 +1941,60 @@ async function runTests() {
     (globalThis as Record<string, unknown>).fetch = realFetch;
     delete (globalThis as Record<string, unknown>).localStorage;
   }
+
+  // Word-like padding (same length as a solid run) so truncation cut points
+  // land near whitespace — a solid run backtracks far and would hide a
+  // marker-overrun bug.
+  const fatItem = (id: string, padChars: number): ParsedActivityItem => ({
+    ...procItem(id, "2025-01-01T00:00:00Z"),
+    turns: [
+      {
+        prompt: "w ".repeat(Math.ceil(padChars / 2)).slice(0, padChars),
+        responseMarkdown: "ack",
+        responseSummary: "ack",
+        extractedEntities: [],
+      },
+    ],
+  });
+  const byteSize = (s: string) => new TextEncoder().encode(s).length;
+  // ~320 packed bytes each at ~80 est. tokens: the byte budget (500) must
+  // split even though the token budget (1e9) never binds.
+  const bytePacked = packItemsIntoBatches(
+    [fatItem("b1", 200), fatItem("b2", 200), fatItem("b3", 200)],
+    1e9,
+    500
+  );
+  assert(
+    bytePacked.batches.length === 3 &&
+      bytePacked.batches.every((b) => byteSize(b) <= 500) &&
+      bytePacked.batches.join("\n").includes("[b3]"),
+    "packItemsIntoBatches splits on the byte budget even when tokens fit"
+  );
+  const huge = packItemsIntoBatches([fatItem("huge", 2000)], 1e9, 500);
+  assert(
+    huge.batches.length === 1 &&
+      huge.batches[0].includes(
+        "[truncated: single chat exceeds the per-request size limit]"
+      ) &&
+      byteSize(huge.batches[0]) <= 500,
+    "packItemsIntoBatches truncates a single oversize chat instead of failing the run"
+  );
+  // Separator accounting: with per-item size s and cap 3s+2, three items fit
+  // by content (3s) but their two "\n\n" joins (3s+4) do not — the packer
+  // must split instead of emitting an over-cap batch.
+  const probe = packItemsIntoBatches([fatItem("pz", 20)], 1e9, 1e9);
+  const s = byteSize(probe.batches[0]);
+  const cap = 3 * s + 2;
+  const sepPacked = packItemsIntoBatches(
+    [fatItem("s1", 20), fatItem("s2", 20), fatItem("s3", 20), fatItem("s4", 20)],
+    1e9,
+    cap
+  );
+  assert(
+    sepPacked.batches.length === 2 &&
+      sepPacked.batches.every((b) => byteSize(b) <= cap),
+    "packItemsIntoBatches counts join separators against the byte budget"
+  );
 
   const chunkItem = (id: string, title: string): ParsedActivityItem => ({
     id,

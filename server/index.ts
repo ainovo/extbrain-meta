@@ -16,6 +16,7 @@ import {
   recoverSpanText,
   truncateAtWordBoundary,
 } from "../src/lib/entities";
+import { MAX_API_BODY_BYTES } from "../src/lib/retrievalEngine";
 
 dotenv.config();
 
@@ -1052,6 +1053,18 @@ app.post("/api/synthesize-thread-stream", async (req, res) => {
       res.status(400).json({ error: "No packed chat batches provided." });
       return;
     }
+    // Defense in depth: the packer caps bodies client-side, but a stale
+    // client could still send a batch the API would truncate mid-JSON
+    // (cryptic 400 hex-escape error). Fail fast with a clear message.
+    const biggest = Math.max(
+      ...batches.map((b) => Buffer.byteLength(b || "", "utf8"))
+    );
+    if (biggest > MAX_API_BODY_BYTES) {
+      res.status(400).json({
+        error: `Packed batch too large (${(biggest / 1024).toFixed(0)}KB > ${MAX_API_BODY_BYTES / 1024}KB per request). Narrow the range or lower Max Packed Tokens in Settings → Models.`,
+      });
+      return;
+    }
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
@@ -1060,8 +1073,12 @@ app.post("/api/synthesize-thread-stream", async (req, res) => {
     // milliseconds (and no proxy buffers the stream) while the model works
     // toward its first token.
     res.flushHeaders();
+    const inputBytes = batches.reduce(
+      (n, b) => n + Buffer.byteLength(b || "", "utf8"),
+      0
+    );
     console.log(
-      `[meta] synthesize start batches=${batches.length} model=${modelConfig?.model}`
+      `[meta] synthesize start batches=${batches.length} model=${modelConfig?.model} input≈${(inputBytes / 1024).toFixed(0)}kb`
     );
     send({ progress: "Contacting Meta model…" });
 

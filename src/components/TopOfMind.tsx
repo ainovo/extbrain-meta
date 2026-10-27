@@ -48,6 +48,7 @@ import {
   ThreadRankMode,
   bucketDayKeys,
   buildRangeStats,
+  countThreadsBySource,
   dataDayBounds,
   filterItemsByRange,
   formatDayRangeLabel,
@@ -278,21 +279,37 @@ function ActivityChart({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [retroOpen, menuOpen]);
-  const { maxTotal, periodTotals, grandTotal } = useMemo(() => {
-    const totals = new Map<ImportSource, number>();
+  const { maxTotal, grandTotal } = useMemo(() => {
     let max = 0;
     let grand = 0;
     for (const b of buckets) {
-      const by = mode === "chats" ? b.chatsBySource : b.threadsBySource;
       const total = mode === "chats" ? b.totalChats : b.totalThreads;
       max = Math.max(max, total);
       grand += total;
-      for (const s of IMPORT_SOURCES) {
-        totals.set(s, (totals.get(s) ?? 0) + by[s]);
-      }
     }
-    return { maxTotal: max, periodTotals: totals, grandTotal: grand };
+    return { maxTotal: max, grandTotal: grand };
   }, [buckets, mode]);
+
+  /**
+   * Legend totals. Chats sum across buckets (each chat sits in exactly
+   * one), but threads are distinct per source over the whole range: a
+   * thread active in two buckets must not count twice, and the legend
+   * must reconcile with the range subtitle.
+   */
+  const legendTotals = useMemo(() => {
+    const totals = new Map<ImportSource, number>();
+    if (mode === "chats") {
+      for (const b of buckets) {
+        for (const s of IMPORT_SOURCES) {
+          totals.set(s, (totals.get(s) ?? 0) + b.chatsBySource[s]);
+        }
+      }
+    } else {
+      const bySource = countThreadsBySource(summarizeThreads(items));
+      for (const s of IMPORT_SOURCES) totals.set(s, bySource[s]);
+    }
+    return totals;
+  }, [buckets, mode, items]);
 
   const noun = mode === "chats" ? "chats" : "threads";
   const multiYear =
@@ -311,10 +328,6 @@ function ActivityChart({
     () => (selected ? bucketDayKeys(selected) : null),
     [selected]
   );
-  const selTotal =
-    selected && mode === "chats"
-      ? selected.totalChats
-      : selected?.totalThreads ?? 0;
   const rangeItems = useMemo(
     () =>
       selKeys
@@ -378,6 +391,14 @@ function ActivityChart({
       })),
     [rangeItems]
   );
+  // Footer count: chats sum, but threads are distinct within the bucket —
+  // the same thread list the summary drawer shows.
+  const selTotal =
+    !selected
+      ? 0
+      : mode === "chats"
+        ? selected.totalChats
+        : retroThreads.length;
   /** Latest saved summary for the selected range + template, if any. */
   const existingForSelection = useMemo(
     () =>
@@ -433,7 +454,7 @@ function ActivityChart({
         ) : (
           <div>
             <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-3">
-              {IMPORT_SOURCES.filter((s) => (periodTotals.get(s) ?? 0) > 0).map(
+              {IMPORT_SOURCES.filter((s) => (legendTotals.get(s) ?? 0) > 0).map(
                 (s) => (
                   <span
                     key={s}
@@ -444,7 +465,7 @@ function ActivityChart({
                     />
                     {s}
                     <span className="font-mono text-mention/60">
-                      {periodTotals.get(s)}
+                      {legendTotals.get(s)}
                     </span>
                   </span>
                 )

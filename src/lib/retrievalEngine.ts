@@ -321,9 +321,41 @@ export function packSingleItemAsymmetrically(item: ParsedActivityItem): string {
   ].join("\n");
 }
 
+/**
+ * Hard cap on packed bytes per synthesis request. The token budget alone
+ * cannot bound the wire: ~4MB bodies were truncated mid-JSON by the API
+ * (~2.3MB observed cut), surfacing as a cryptic 400 hex-escape error. 1MB
+ * keeps a >2x margin under that, including JSON escaping overhead.
+ */
+export const MAX_API_BODY_BYTES = 1000000;
+
+function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+const TRUNCATION_MARKER =
+  "\n...[truncated: single chat exceeds the per-request size limit]...";
+
+/**
+ * Byte-exact truncation that never splits a multibyte char or a word. The
+ * result (marker included) never exceeds maxBytes.
+ */
+function truncateUtf8ToBytes(text: string, maxBytes: number): string {
+  const enc = new TextEncoder().encode(text);
+  if (enc.length <= maxBytes) return text;
+  const budget = Math.max(0, maxBytes - utf8Bytes(TRUNCATION_MARKER));
+  const cut = new TextDecoder().decode(enc.slice(0, budget)).replace(
+    /\uFFFD+$/,
+    ""
+  );
+  const ws = cut.search(/\s[^\s]*$/);
+  return (ws > 0 ? cut.slice(0, ws) : cut) + TRUNCATION_MARKER;
+}
+
 export function packItemsIntoBatches(
   selectedItems: ParsedActivityItem[],
-  maxTokensPerBatch = DEFAULT_MAX_TOKENS_PER_BATCH
+  maxTokensPerBatch = DEFAULT_MAX_TOKENS_PER_BATCH,
+  maxBytesPerBatch = MAX_API_BODY_BYTES
 ): { batches: string[]; totalPackedTokens: number; totalRawTokens: number } {
   // Sort chronologically oldest -> newest for timeline synthesis
   const sorted = [...selectedItems].sort((a, b) =>
@@ -334,23 +366,39 @@ export function packItemsIntoBatches(
   const batches: string[] = [];
   let currentBatchParts: string[] = [];
   let currentBatchTokens = 0;
+  let currentBatchBytes = 0;
 
   for (const item of sorted) {
     totalRawTokens += item.estimatedFullTokens;
-    const packed = packSingleItemAsymmetrically(item);
+    let packed = packSingleItemAsymmetrically(item);
+    // A single chat can exceed the whole budget on its own: truncate it to
+    // a request that fits instead of failing the entire run.
+    if (utf8Bytes(packed) > maxBytesPerBatch) {
+      packed = truncateUtf8ToBytes(packed, maxBytesPerBatch);
+    }
     const tokens = estimateTokens(packed);
+    const bytes = utf8Bytes(packed);
     totalPackedTokens += tokens;
+    // Account for the "\n\n" join: separators are real wire bytes (~2 per
+    // chat), and ignoring them lets big batches slip just over the cap.
+    const bytesIfAdded =
+      currentBatchParts.length > 0
+        ? currentBatchBytes + 2 + bytes
+        : bytes;
 
     if (
       currentBatchParts.length > 0 &&
-      currentBatchTokens + tokens > maxTokensPerBatch
+      (currentBatchTokens + tokens > maxTokensPerBatch ||
+        bytesIfAdded > maxBytesPerBatch)
     ) {
       batches.push(currentBatchParts.join("\n\n"));
       currentBatchParts = [packed];
       currentBatchTokens = tokens;
+      currentBatchBytes = bytes;
     } else {
       currentBatchParts.push(packed);
       currentBatchTokens += tokens;
+      currentBatchBytes = bytesIfAdded;
     }
   }
 
