@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import {
   CompactIndexCard,
@@ -162,17 +163,35 @@ let serverNerLoadingPromise: Promise<any> | null = null;
  */
 const NER_EXTRACTOR_VERSION = 9;
 
-/** Token-classification model for NER (extractor and tokenizer agree). */
-const NER_MODEL_ID = "Jean-Baptiste/roberta-large-ner-english";
+/**
+ * Token-classification model for NER (extractor and tokenizer agree). The
+ * author repo ships no tokenizer.json/onnx layout, so the weights live in
+ * a prepared local dir (scripts/prepare_roberta_ner.py, one-time ~1.8GB);
+ * resolved from this file so the server's working directory doesn't matter.
+ */
+const NER_MODEL_ID = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "models",
+  "roberta-large-ner-english"
+);
 
 async function getServerNerExtractor() {
   if (serverNerExtractor) return serverNerExtractor;
   if (!serverNerLoadingPromise) {
     serverNerLoadingPromise = (async () => {
+      if (
+        !fs.existsSync(path.join(NER_MODEL_ID, "onnx", "model_quantized.onnx")) &&
+        !fs.existsSync(path.join(NER_MODEL_ID, "onnx", "model.onnx"))
+      ) {
+        throw new Error(
+          `RoBERTa NER weights missing at ${NER_MODEL_ID} — run: npm run prepare:ner`
+        );
+      }
       const { pipeline, env, AutoTokenizer } = await import(
         "@huggingface/transformers"
       );
-      env.allowLocalModels = false;
+      env.allowLocalModels = true;
       try {
         serverNerExtractor = await pipeline(
           "token-classification",
@@ -180,8 +199,8 @@ async function getServerNerExtractor() {
           { dtype: "q8" }
         );
       } catch (err) {
-        // No quantized weights published (or a transient download failure):
-        // fall back to full precision rather than failing all NER.
+        // Quantized load failed (e.g. quantization was skipped): fall back
+        // to full precision rather than failing all NER.
         console.warn(
           `[ner] quantized load failed for ${NER_MODEL_ID}, retrying full precision:`,
           err instanceof Error ? err.message : err

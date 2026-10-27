@@ -613,19 +613,20 @@ async function runTests() {
     "markerless runs absorb untagged mid-word fragments: Berkeley, not Ber"
   );
 
-  // RoBERTa (byte-level BPE) output shape: per-id decodes carry Ġ
-  // word-start markers (except possibly the text-initial word), so runs
-  // break before Ġ, unmarked fragments ("ke", "ley", ",") glue onto the
-  // open word, and recovery strips Ġ before matching source text.
+  // RoBERTa (byte-level BPE) output shape, copied from the real local
+  // pipeline: decode() renders word-start markers as plain spaces, labels
+  // are bare ("PER", this head has no BIO prefixes), and only tagged
+  // tokens come back. Runs break before marked starts, unmarked fragments
+  // ("ke", "ley", ",") glue onto the open word.
   const rbSource = "Clara Oswald visited Berkeley, CA";
-  const rbSurfaces = ["<s>", "Clara", "ĠOswald", "Ġvisited", "ĠBer", "ke", "ley", ",", "ĠCA", "</s>"];
+  const rbSurfaces = ["<s>", "Clara", " Oswald", " visited", " Ber", "ke", "ley", ",", " CA", "</s>"];
   const rbTokens = [
-    { entity: "B-PER", score: 0.99, index: 1, word: "Clara" },
-    { entity: "I-PER", score: 0.98, index: 2, word: "ĠOswald" },
-    { entity: "B-LOC", score: 0.97, index: 4, word: "ĠBer" },
-    { entity: "I-LOC", score: 0.96, index: 5, word: "ke" },
-    { entity: "I-LOC", score: 0.95, index: 6, word: "ley" },
-    { entity: "B-LOC", score: 0.9, index: 8, word: "ĠCA" },
+    { entity: "PER", score: 0.99, index: 1, word: "Clara" },
+    { entity: "PER", score: 0.98, index: 2, word: " Oswald" },
+    { entity: "LOC", score: 0.97, index: 4, word: " Ber" },
+    { entity: "LOC", score: 0.96, index: 5, word: "ke" },
+    { entity: "LOC", score: 0.95, index: 6, word: "ley" },
+    { entity: "LOC", score: 0.9, index: 8, word: " CA" },
   ];
   const rbProj = projectTextAlnum(rbSource);
   const rbWords = nerWordRuns(rbSurfaces, rbTokens, rbSource);
@@ -635,7 +636,7 @@ async function runTests() {
       rbWords[3].lo === 4 &&
       rbWords[3].hi === 7 &&
       rbWords[3].text === "berkeley,",
-    "RoBERTa runs break on Ġ and glue unmarked fragments onto the open word"
+    "RoBERTa runs break on marked starts and glue unmarked fragments on"
   );
   assert(
     rbGroups.length === 2 &&
@@ -645,7 +646,22 @@ async function runTests() {
       recoverSpanText(rbSource, rbProj, rbSurfaces, rbGroups[0].lo, rbGroups[0].hi) === "Clara Oswald" &&
       rbGroups[1].type === "LOC" &&
       recoverSpanText(rbSource, rbProj, rbSurfaces, rbGroups[1].lo, rbGroups[1].hi) === "Berkeley, CA",
-    "RoBERTa spans recover across Ġ fragments: Clara Oswald, Berkeley, CA"
+    "RoBERTa spans recover across fragments: Clara Oswald, Berkeley, CA"
+  );
+  // Raw Ġ-marked decodes (other tokenizers keep the marker) group and
+  // recover the same.
+  const rbRawSurfaces = rbSurfaces.map((s) =>
+    s.startsWith(" ") ? "Ġ" + s.slice(1) : s
+  );
+  const rbRawWords = nerWordRuns(rbRawSurfaces, rbTokens, rbSource);
+  assert(
+    rbRawWords.length === 5 &&
+      rbRawWords[3].lo === 4 &&
+      rbRawWords[3].hi === 7 &&
+      groupNerWords(rbRawWords).length === 2 &&
+      recoverSpanText(rbSource, rbProj, rbRawSurfaces, 1, 2) ===
+        "Clara Oswald",
+    "RoBERTa raw Ġ markers group identically to decoded spaces"
   );
   // Single-word texts carry no Ġ at all: grouping falls back to
   // source-text adjacency instead of degrading.

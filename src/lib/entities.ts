@@ -387,7 +387,8 @@ function markerlessWordStarts(
  *
  * Three fragment schemes are supported. WordPiece surfaces carry ##
  * continuation markers, so runs extend over them directly. Byte-level BPE
- * (RoBERTa) surfaces carry a Ġ word-START marker, so runs break before it.
+ * (RoBERTa) surfaces carry a word-START marker (Ġ raw, or a plain space as
+ * transformers.js decode() renders it), so runs break before it.
  * Markerless per-id decodes (XLM-R SentencePiece) group by source-text
  * adjacency instead and require `sourceText`; without it every token
  * degrades to its own word.
@@ -402,7 +403,11 @@ export function nerWordRuns(
     if (!t || typeof t.index !== "number" || typeof t.entity !== "string") {
       continue;
     }
-    if (!/^([BI])-(.+)$/.exec(t.entity)) continue;
+    // Labels come prefixed ("B-PER") or bare ("PER", as this RoBERTa head
+    // emits); grouping never distinguishes B- from I-, so both tag the
+    // token. "O" rows (when a pipeline includes them) stay untagged.
+    const tag = parseNerTag(t.entity);
+    if (!tag) continue;
     const prev = byIdx.get(t.index);
     const sc = typeof t.score === "number" ? t.score : 0;
     if (!prev || sc > (typeof prev.score === "number" ? prev.score : 0)) {
@@ -412,13 +417,11 @@ export function nerWordRuns(
   // A decoded "##"-prefixed surface can only come from WordPiece, so its
   // presence selects the fragment scheme for the whole call.
   const wordPiece = surfaces.some((s) => !!s && s.startsWith("##"));
-  // A Ġ-prefixed surface can only come from byte-level BPE (RoBERTa/GPT-2),
-  // where Ġ marks word starts. Every word but (possibly) the text-initial
-  // one carries it, so its absence (single-word texts) falls back to
-  // source-text adjacency below.
-  const roberta = surfaces.some(
-    (s) => !!s && s.startsWith(ROBERTA_WORD_MARKER)
-  );
+  // A word-marked surface (Ġ- or space-prefixed) can only come from
+  // byte-level BPE (RoBERTa/GPT-2), where the marker flags word starts.
+  // Every word but (possibly) the text-initial one carries it, so its
+  // absence (single-word texts) falls back to source-text adjacency below.
+  const roberta = surfaces.some((s) => !!s && startsWordMarked(s));
   const wordStarts =
     !wordPiece && !roberta && sourceText
       ? markerlessWordStarts(surfaces, sourceText)
@@ -436,12 +439,13 @@ export function nerWordRuns(
     if (wordStarts) {
       while (j + 1 < n && !wordStarts[j + 1]) j++;
     } else if (roberta) {
-      // Runs break before the next Ġ word-start (or a special token, which
-      // always ends the run); unmarked fragments glue onto the open word.
+      // Runs break before the next marked word-start (or a special token,
+      // which always ends the run); unmarked fragments glue onto the open
+      // word.
       while (
         j + 1 < n &&
         !SPECIAL_TOKENS.has(surfaces[j + 1] ?? "") &&
-        !surfaces[j + 1]?.startsWith(ROBERTA_WORD_MARKER)
+        !startsWordMarked(surfaces[j + 1] ?? "")
       ) {
         j++;
       }
@@ -454,10 +458,9 @@ export function nerWordRuns(
     const frags: Array<{ type: string | null; score: number }> = [];
     for (let k = i; k <= j; k++) {
       const surf = surfaces[k] ?? "";
-      // Ġ is \p{L}, so a bare space-marker would read as a real word unless
+      // Ġ is \p{L}, so a bare marker would read as a real word unless
       // stripped before the alphanumeric scan.
-      const bare =
-        roberta && surf.startsWith(ROBERTA_WORD_MARKER) ? surf.slice(1) : surf;
+      const bare = roberta ? stripWordMarker(surf) : surf;
       if (!surf.startsWith("##") && !SPECIAL_TOKENS.has(surf)) {
         for (const ch of bare) {
           if (/[\p{L}\p{N}]/u.test(ch)) {
@@ -472,7 +475,7 @@ export function nerWordRuns(
         continue;
       }
       const sc = typeof t.score === "number" ? t.score : 0;
-      const ft = /^([BI])-(.+)$/.exec(t.entity)![2].toUpperCase();
+      const ft = parseNerTag(t.entity)!;
       frags.push({ type: ft, score: sc });
       if (!type || sc > best) {
         type = ft;
@@ -486,9 +489,7 @@ export function nerWordRuns(
           frags.length;
     const text = surfaces
       .slice(i, j + 1)
-      .map((w) =>
-        roberta && w.startsWith(ROBERTA_WORD_MARKER) ? w.slice(1) : w
-      )
+      .map((w) => (roberta ? stripWordMarker(w) : w))
       .join("")
       .toLowerCase();
     words.push({ lo: i, hi: j, text, type, score, glue });
@@ -666,11 +667,32 @@ export function projectTextAlnum(source: string): TextProjection {
 }
 
 /**
- * Byte-level BPE word-start marker (RoBERTa/GPT-2 per-id decodes look like
- * "Ġhello"). It matches \p{L}, so every alphanumeric scan must strip it
- * first or "Ġ..." fragments pollute needles and glue checks.
+ * Byte-level BPE word-start marker (RoBERTa/GPT-2): raw per-id decodes look
+ * like "Ġhello", while transformers.js decode() renders the marker as a
+ * plain space (" hello"). Ġ matches \p{L}, so every alphanumeric scan must
+ * strip one leading marker of either form first.
  */
-const ROBERTA_WORD_MARKER = "Ġ";
+const ROBERTA_WORD_MARKERS = ["Ġ", " "];
+
+function startsWordMarked(surface: string): boolean {
+  return ROBERTA_WORD_MARKERS.includes(surface[0] ?? "");
+}
+
+function stripWordMarker(surface: string): string {
+  return startsWordMarked(surface) ? surface.slice(1) : surface;
+}
+
+/**
+ * Normalize a raw NER tag to its uppercase label ("B-PER" and "PER" both
+ * give "PER"); null for "O" and malformed tags. Grouping fuses same-type
+ * adjacent words either way, so bare labels need no B-/I- distinction.
+ */
+function parseNerTag(entity: string): string | null {
+  const m = /^(?:([BI])-)?([A-Za-z]+)$/.exec(entity.trim());
+  if (!m) return null;
+  const label = m[2].toUpperCase();
+  return label === "O" ? null : label;
+}
 
 const SPECIAL_TOKENS = new Set([
   "[CLS]",
@@ -705,7 +727,7 @@ export function recoverSpanText(
     let s = surfaces[i];
     if (!s || SPECIAL_TOKENS.has(s)) continue;
     if (s.startsWith("##")) s = s.slice(2);
-    if (s.startsWith(ROBERTA_WORD_MARKER)) s = s.slice(1);
+    s = stripWordMarker(s);
     for (const ch of s) {
       if (/[\p{L}\p{N}]/u.test(ch)) needle += ch.toLowerCase();
     }
