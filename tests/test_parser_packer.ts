@@ -787,11 +787,12 @@ async function runTests() {
   const rbWords = nerWordRuns(rbSurfaces, rbTokens, rbSource);
   const rbGroups = groupNerWords(rbWords);
   assert(
-    rbWords.length === 5 &&
+    rbWords.length === 6 &&
       rbWords[3].lo === 4 &&
-      rbWords[3].hi === 7 &&
-      rbWords[3].text === "berkeley,",
-    "RoBERTa runs break on marked starts and glue unmarked fragments on"
+      rbWords[3].hi === 6 &&
+      rbWords[3].text === "berkeley" &&
+      rbWords[4].text === ",",
+    "RoBERTa runs break on marked starts, glue fragments, split commas"
   );
   assert(
     rbGroups.length === 2 &&
@@ -810,13 +811,68 @@ async function runTests() {
   );
   const rbRawWords = nerWordRuns(rbRawSurfaces, rbTokens, rbSource);
   assert(
-    rbRawWords.length === 5 &&
+    rbRawWords.length === 6 &&
       rbRawWords[3].lo === 4 &&
-      rbRawWords[3].hi === 7 &&
+      rbRawWords[3].hi === 6 &&
       groupNerWords(rbRawWords).length === 2 &&
       recoverSpanText(rbSource, rbProj, rbRawSurfaces, 1, 2) ===
         "Clara Oswald",
     "RoBERTa raw Ġ markers group identically to decoded spaces"
+  );
+  // Coordinations enumerate: "Braden, Max and Theo" is three people, while
+  // the comma place "Berkeley, CA" stays one.
+  const coordSource = "Met Braden, Max and Theo in Berkeley, CA";
+  const coordSurfaces = ["<s>", "Met", " Braden", ",", " Max", " and", " Theo", " in", " Berkeley", ",", " CA", "</s>"];
+  const coordTokens = [
+    { entity: "PER", score: 0.99, index: 2, word: " Braden" },
+    { entity: "PER", score: 0.99, index: 4, word: " Max" },
+    { entity: "PER", score: 0.99, index: 6, word: " Theo" },
+    { entity: "LOC", score: 0.99, index: 8, word: " Berkeley" },
+    { entity: "LOC", score: 0.99, index: 10, word: " CA" },
+  ];
+  const coordProj = projectTextAlnum(coordSource);
+  const coordWords = nerWordRuns(coordSurfaces, coordTokens, coordSource);
+  const coordGroups = groupNerWords(coordWords);
+  assert(
+    coordGroups.length === 4 &&
+      recoverSpanText(coordSource, coordProj, coordSurfaces, coordGroups[0].lo, coordGroups[0].hi) === "Braden" &&
+      recoverSpanText(coordSource, coordProj, coordSurfaces, coordGroups[1].lo, coordGroups[1].hi) === "Max" &&
+      recoverSpanText(coordSource, coordProj, coordSurfaces, coordGroups[2].lo, coordGroups[2].hi) === "Theo" &&
+      recoverSpanText(coordSource, coordProj, coordSurfaces, coordGroups[3].lo, coordGroups[3].hi) === "Berkeley, CA",
+    "coordinations split on commas while comma places stay whole"
+  );
+  // A tagged period must not type its word: "folks." stays untagged off
+  // "." alone, so "St. Louis folks" splits instead of fusing.
+  const punctWords = nerWordRuns(
+    ["<s>", " folks", ".", "</s>"],
+    [{ entity: "LOC", score: 0.98, index: 2 }],
+    "folks."
+  );
+  assert(
+    punctWords.length === 1 && punctWords[0].type === null,
+    "punctuation fragments never vote on a word's type"
+  );
+  const stSource = "St. Louis folks.";
+  const stSurfaces = ["<s>", " St", ".", " Louis", " folks", ".", "</s>"];
+  const stTokens = [
+    { entity: "LOC", score: 0.99, index: 1 },
+    { entity: "LOC", score: 0.98, index: 2 },
+    { entity: "LOC", score: 0.99, index: 3 },
+    { entity: "LOC", score: 0.98, index: 5 },
+  ];
+  const stGroups = groupNerWords(
+    nerWordRuns(stSurfaces, stTokens, stSource)
+  );
+  assert(
+    stGroups.length === 1 &&
+      recoverSpanText(
+        stSource,
+        projectTextAlnum(stSource),
+        stSurfaces,
+        stGroups[0].lo,
+        stGroups[0].hi
+      ) === "St. Louis",
+    "a tagged trailing period cannot drag the next word into the span"
   );
   // Newlines split runs: "Response:\n[Bob Iger" must not fuse the section
   // label into the name (stored "Response: Bob Iger" hides the entity).

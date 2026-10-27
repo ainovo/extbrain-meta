@@ -167,11 +167,13 @@ let serverNerLoadingPromise: Promise<any> | null = null;
  * 11 = newlines split word runs (section labels no longer fuse into names),
  * 12 = markdown stripped before NER; spaced joins after .?! split as
  * sentence boundaries (abbreviations excepted),
- * 13 = JSON blobs and UUIDs stripped before NER; names capped at 120 chars).
+ * 13 = JSON blobs and UUIDs stripped before NER; names capped at 120 chars,
+ * 14 = list separators split word runs (coordinations enumerate again);
+ * tagged punctuation never votes on a word's type).
  * The Load page stores this per chat alongside its content hash and only
  * reprocesses chats whose record is missing, stale, or from an older version.
  */
-const NER_EXTRACTOR_VERSION = 13;
+const NER_EXTRACTOR_VERSION = 14;
 
 /**
  * Token-classification model for NER (extractor and tokenizer agree). The

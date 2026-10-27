@@ -656,12 +656,14 @@ export function nerWordRuns(
     } else if (roberta) {
       // Runs break before the next marked word-start (or a special token,
       // which always ends the run); unmarked fragments glue onto the open
-      // word.
+      // word. List separators (, ;) never glue: "Braden, Max" must reach
+      // grouping as three words or coordinations fuse into one span.
       while (
         j + 1 < n &&
         !SPECIAL_TOKENS.has(surfaces[j + 1] ?? "") &&
         !startsWordMarked(surfaces[j + 1] ?? "") &&
-        !hasNewline(surfaces[j + 1] ?? "")
+        !hasNewline(surfaces[j + 1] ?? "") &&
+        !LIST_SEPS.has(stripWordMarker(surfaces[j + 1] ?? ""))
       ) {
         j++;
       }
@@ -680,6 +682,13 @@ export function nerWordRuns(
     const frags: Array<{ type: string | null; score: number }> = [];
     for (let k = i; k <= j; k++) {
       const surf = surfaces[k] ?? "";
+      // Punctuation fragments (a tagged "." or ",") never vote: "folks."
+      // must not type as LOC off its period, and glue punct must not
+      // dampen the fragments that do ("U.S." still types off U and S).
+      const votable = stripWordMarker(
+        surf.startsWith("##") ? surf.slice(2) : surf
+      );
+      if (!/[\p{L}\p{N}]/u.test(votable)) continue;
       // Ġ is \p{L}, so a bare marker would read as a real word unless
       // stripped before the alphanumeric scan.
       const bare = roberta ? stripWordMarker(surf) : surf;
