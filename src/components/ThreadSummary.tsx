@@ -31,7 +31,13 @@ import {
   loadSavedSummaries,
   updateSavedSummaryMarkdown,
 } from "../lib/savedSummaries";
-import { streamSynthesis } from "../lib/synthesize";
+import {
+  SynthesisPlan,
+  formatSynthesisWarning,
+  planSynthesis,
+  streamSynthesis,
+  synthesisNeedsConfirm,
+} from "../lib/synthesize";
 
 export interface ThreadSummaryOptions {
   threadKey: string;
@@ -78,6 +84,11 @@ export function useThreadSummary({
   const [activeSavedId, setActiveSavedId] = useState<string | null>(null);
   const [progressNote, setProgressNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Pending template + plan while a large run waits for confirmation. */
+  const [confirm, setConfirm] = useState<{
+    plan: SynthesisPlan;
+    tpl: PromptTemplate;
+  } | null>(null);
   const [copied, setCopied] = useState(false);
   const [saved, setSaved] = useState<SavedSummary[]>(() =>
     loadSavedSummaries(uuid).filter((s) =>
@@ -108,6 +119,7 @@ export function useThreadSummary({
     setActiveSavedId(null);
     setProgressNote(null);
     setError(null);
+    setConfirm(null);
     setDropdownOpen(false);
     setSaved(
       loadSavedSummaries(uuid).filter((s) =>
@@ -135,8 +147,18 @@ export function useThreadSummary({
 
   const stop = () => abortRef.current?.abort();
 
-  const generateWith = async (tpl: PromptTemplate) => {
+  const generateWith = async (tpl: PromptTemplate, confirmed = false) => {
     if (items.length === 0) return;
+    if (!confirmed) {
+      const plan = planSynthesis(items, maxTokensPerBatch);
+      if (synthesisNeedsConfirm(plan)) {
+        setSelectedTemplateId(tpl.id);
+        setDropdownOpen(false);
+        setConfirm({ plan, tpl });
+        return;
+      }
+    }
+    setConfirm(null);
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -220,7 +242,14 @@ export function useThreadSummary({
     markdownRef.current = "";
     setProgressNote(null);
     setError(null);
+    setConfirm(null);
   };
+
+  const confirmGenerate = () => {
+    if (confirm) void generateWith(confirm.tpl, true);
+  };
+
+  const cancelConfirm = () => setConfirm(null);
 
   const removeSaved = (id: string) => {
     try {
@@ -266,6 +295,9 @@ export function useThreadSummary({
     items,
     onOpenModelSettings,
     generateWith,
+    confirm,
+    confirmGenerate,
+    cancelConfirm,
     handleCopy,
     close,
     stop,
@@ -483,6 +515,9 @@ export const ThreadSummaryPanel: React.FC<{ api: ThreadSummaryApi }> = ({
     saved,
     selectedTemplate,
     generateWith,
+    confirm,
+    confirmGenerate,
+    cancelConfirm,
     handleCopy,
     close,
     stop,
@@ -492,7 +527,7 @@ export const ThreadSummaryPanel: React.FC<{ api: ThreadSummaryApi }> = ({
     onOpenModelSettings,
   } = api;
 
-  const showActive = status !== "idle" || markdown || error;
+  const showActive = status !== "idle" || markdown || error || confirm;
   const visibleSaved = markdown
     ? saved.filter((s) => s.markdown !== markdown)
     : saved;
@@ -552,7 +587,29 @@ export const ThreadSummaryPanel: React.FC<{ api: ThreadSummaryApi }> = ({
         )}
       </div>
 
-      {error ? (
+      {confirm ? (
+        <div className="px-4 py-3 space-y-2">
+          <p className="text-[13px] text-ink leading-relaxed">
+            {formatSynthesisWarning(confirm.plan, { noun: "thread" })}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={confirmGenerate}
+              className="inline-flex items-center gap-1 rounded-lg bg-action px-3 py-1.5 text-xs font-medium text-white hover:bg-action-hover transition"
+            >
+              Generate anyway
+            </button>
+            <button
+              type="button"
+              onClick={cancelConfirm}
+              className="inline-flex items-center gap-1 rounded-lg border border-divider bg-white px-3 py-1.5 text-xs font-medium text-ink hover:bg-tag transition"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : error ? (
         <div className="px-4 py-3 text-[13px] text-ink flex flex-wrap items-center gap-3">
           <span>Error: {error}</span>
           <button

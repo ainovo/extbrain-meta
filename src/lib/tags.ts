@@ -1,3 +1,9 @@
+import {
+  decodeStoredJson,
+  encodeCompressedJson,
+  setStoredItem,
+} from "./compressedJson";
+
 export interface TagScores {
   /** Max score across the tag's target_labels. */
   t: number;
@@ -49,21 +55,22 @@ export function newTagId(): string {
 
 export function loadTags(uuid: string): TagDef[] {
   try {
-    const raw = localStorage.getItem(keyFor(uuid));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
+    const parsed = decodeStoredJson(localStorage.getItem(keyFor(uuid)));
     return Array.isArray(parsed) ? (parsed as TagDef[]) : [];
   } catch {
     return [];
   }
 }
 
-export function saveTags(uuid: string, tags: TagDef[]): void {
-  try {
-    localStorage.setItem(keyFor(uuid), JSON.stringify(tags));
-  } catch {
-    // Quota or privacy mode: scores stay in memory for the session.
+export function saveTags(uuid: string, tags: TagDef[]): boolean {
+  const payload = encodeCompressedJson(tags);
+  const ok = setStoredItem(keyFor(uuid), payload);
+  if (!ok) {
+    console.error(
+      `[extbrain] failed to persist ${payload.length} bytes of tags`
+    );
   }
+  return ok;
 }
 
 /** Chats passing the auto-tag rule, highest target score first. */

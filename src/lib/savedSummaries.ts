@@ -1,3 +1,9 @@
+import {
+  decodeStoredJson,
+  encodeCompressedJson,
+  setStoredItem,
+} from "./compressedJson";
+
 export interface SavedSummaryThreadSource {
   key: string;
   title: string;
@@ -39,9 +45,7 @@ function isSavedSummary(s: unknown): s is SavedSummary {
 
 export function loadSavedSummaries(uuid: string): SavedSummary[] {
   try {
-    const raw = localStorage.getItem(keyFor(uuid));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
+    const parsed = decodeStoredJson(localStorage.getItem(keyFor(uuid)));
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(isSavedSummary);
   } catch {
@@ -60,10 +64,13 @@ export function replaceSavedSummaries(
 }
 
 function persist(uuid: string, list: SavedSummary[]): void {
-  try {
-    localStorage.setItem(keyFor(uuid), JSON.stringify(list));
-  } catch {
+  const payload = encodeCompressedJson(list);
+  const ok = setStoredItem(keyFor(uuid), payload);
+  if (!ok) {
     // quota/privacy: keep in memory only
+    console.error(
+      `[extbrain] failed to persist ${payload.length} bytes of summaries`
+    );
   }
 }
 

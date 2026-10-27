@@ -22,6 +22,11 @@ import {
   loadCustomThreadTemplates,
 } from "../lib/promptTemplates";
 import { ChatEntityMap } from "../lib/entities";
+import {
+  ThreadCategoryMap,
+  categoryLabelFor,
+  topCategory,
+} from "../lib/categoryTags";
 import { summarizeThreads, ThreadSummary } from "../lib/threads";
 import {
   SavedSummary,
@@ -802,9 +807,19 @@ function ActivityChart({
 function TopThreadsSection({
   threads,
   onOpenThread,
+  entityMap,
+  hasEntities,
+  onViewChats,
+  minScore = 0,
+  categoryMap,
 }: {
   threads: ThreadSummary[];
   onOpenThread: (key: string) => void;
+  entityMap: ChatEntityMap;
+  hasEntities: boolean;
+  onViewChats: (keys: string[]) => void;
+  minScore?: number;
+  categoryMap: ThreadCategoryMap;
 }) {
   const [mode, setMode] = usePersistentState<ThreadRankMode>(
     STORE_KEYS.threadRankMode,
@@ -835,26 +850,46 @@ function TopThreadsSection({
           </p>
         ) : (
           <div className="mt-2 -mx-2 flex-1">
-            {top.map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => onOpenThread(t.key)}
-                title={t.title}
-                className="w-full flex items-baseline gap-2 px-2 py-2 rounded-lg hover:bg-tag text-left transition group"
-              >
-                <span className="flex-1 min-w-0 break-words text-[13px] font-medium text-ink leading-snug line-clamp-3">
-                  {t.title}
-                </span>
-                <span className="shrink-0 text-[11px] font-mono text-mention">
-                  {mode === "duration"
-                    ? formatDuration(threadDurationMs(t))
-                    : `${t.count} ${t.count === 1 ? "chat" : "chats"}`}
-                </span>
-              </button>
-            ))}
+            {top.map((t) => {
+              const rec = categoryMap[t.key];
+              const tag = rec ? topCategory(rec.scores) : null;
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => onOpenThread(t.key)}
+                  title={t.title}
+                  className="w-full flex items-baseline gap-2 px-2 py-2 rounded-lg hover:bg-tag text-left transition group"
+                >
+                  <span className="flex-1 min-w-0 break-words text-[13px] font-medium text-ink leading-snug line-clamp-3">
+                    {t.title}
+                  </span>
+                  {tag && (
+                    <span
+                      title={`Top category: ${categoryLabelFor(tag)}`}
+                      className="shrink-0 rounded-md bg-tag px-1.5 py-0.5 text-[10px] font-medium text-mention"
+                    >
+                      #{tag}
+                    </span>
+                  )}
+                  <span className="shrink-0 text-[11px] font-mono text-mention">
+                    {mode === "duration"
+                      ? formatDuration(threadDurationMs(t))
+                      : `${t.count} ${t.count === 1 ? "chat" : "chats"}`}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         )}
+        <div className="mt-3">
+          <MentionSearchBar
+            entityMap={entityMap}
+            hasEntities={hasEntities}
+            onViewChats={onViewChats}
+            minScore={minScore}
+          />
+        </div>
       </BlockPad>
     </Block>
   );
@@ -1087,7 +1122,7 @@ function MentionSection({
                 key={h.key}
                 type="button"
                 onClick={() => onViewChats([h.key])}
-                title={`${h.display} — view chats`}
+                title={`${h.display} — view threads`}
                 className="inline-flex items-center gap-1.5 rounded-full bg-mention px-3 py-1 text-[13px] font-medium text-white hover:bg-ink transition max-w-full"
               >
                 <span className="truncate min-w-0">{h.display}</span>
@@ -1106,6 +1141,7 @@ function MentionSection({
 export const TopOfMind: React.FC<{
   items: ParsedActivityItem[];
   entityMap: ChatEntityMap;
+  categoryMap: ThreadCategoryMap;
   uuid: string;
   onOpenThread: (key: string) => void;
   onViewChats: (keys: string[]) => void;
@@ -1119,6 +1155,7 @@ export const TopOfMind: React.FC<{
 }> = ({
   items,
   entityMap,
+  categoryMap,
   uuid,
   onOpenThread,
   onViewChats,
@@ -1305,20 +1342,21 @@ export const TopOfMind: React.FC<{
       />
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <TopThreadsSection threads={titledThreads} onOpenThread={onOpenThread} />
+        <TopThreadsSection
+          threads={titledThreads}
+          onOpenThread={onOpenThread}
+          entityMap={entityMap}
+          hasEntities={hasEntities}
+          onViewChats={onViewChats}
+          minScore={minScore}
+          categoryMap={categoryMap}
+        />
         <ActionItemsSection
           uuid={uuid}
           onOpenThread={onOpenThread}
           onNavigate={onNavigate}
         />
       </div>
-
-      <MentionSearchBar
-        entityMap={entityMap}
-        hasEntities={hasEntities}
-        onViewChats={onViewChats}
-        minScore={minScore}
-      />
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <MentionSection

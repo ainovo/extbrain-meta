@@ -5,8 +5,19 @@ import {
   ChatEntityMap,
   chatNeedsProcessing,
   entityTextHash,
+  saveChatEntities,
   saveChatEntityHashes,
 } from "./entities";
+import {
+  CATEGORY_LABELS,
+  THREAD_CATEGORY_VERSION,
+  ThreadCategoryMap,
+  buildThreadScoringText,
+  saveThreadCategories,
+  scoresToCategories,
+  threadNeedsCategoryScoring,
+} from "./categoryTags";
+import { summarizeThreads } from "./threads";
 
 export interface ProcessQueueItem {
   id: string;
@@ -14,8 +25,12 @@ export interface ProcessQueueItem {
   hash: string;
 }
 
+export type ProcessPhase = "entities" | "categories";
+
 export interface ProcessJobSnapshot {
   status: "idle" | "running";
+  /** Which post-NER step the run is in (categories always run last). */
+  phase: ProcessPhase;
   done: number;
   total: number;
   error: string | null;
@@ -28,14 +43,23 @@ export interface ProcessStartArgs {
   items: ParsedActivityItem[];
   baseMap: ChatEntityMap;
   baseHashes: ChatEntityHashMap;
+  baseThreadCategories: ThreadCategoryMap;
   serverVersion: number | null;
   microBatch?: number;
   onBatch: (merged: ChatEntityMap, batchHashes: ChatEntityHashMap) => void;
+  onCategories: (merged: ThreadCategoryMap) => void;
 }
 
 type Listener = (snap: ProcessJobSnapshot) => void;
 
 const MICRO_BATCH = 8;
+/**
+ * Category micro-batch: inputs are short (prompt + first sentence) and the
+ * server scores the batch in one pipeline call, so bigger slices amortize
+ * HTTP plus full-map re-save overhead. Callers may still override via
+ * args.microBatch (tests do).
+ */
+const CATEGORY_MICRO_BATCH = 16;
 
 /**
  * Chats needing (re-)processing, newest first: missing entities, changed
@@ -68,15 +92,48 @@ export function buildProcessQueue(
   return queue.map(({ id, text, hash }) => ({ id, text, hash }));
 }
 
+/**
+ * Threads queued for category scoring, newest first: one verdict per
+ * thread key, independent of NER (keyless chats belong to no thread and
+ * are never scored). A thread requeues only when its text changed or its
+ * verdict predates the current taxonomy/scorer version.
+ */
+export function buildThreadCategoryQueue(
+  items: ParsedActivityItem[],
+  baseThreadCategories: ThreadCategoryMap
+): ProcessQueueItem[] {
+  const queue: ProcessQueueItem[] = [];
+  for (const t of summarizeThreads(items)) {
+    const text = buildThreadScoringText(t.chats);
+    const hash = entityTextHash(text);
+    if (
+      !threadNeedsCategoryScoring({
+        entry: baseThreadCategories[t.key],
+        hash,
+      })
+    ) {
+      continue;
+    }
+    queue.push({ id: t.key, text, hash });
+  }
+  return queue;
+}
+
 interface BatchResult {
   id: string;
   entities: Array<{ text: string; label: string; score: number }>;
 }
 
+interface CategoryBatchResult {
+  id: string;
+  scores: Record<string, number>;
+}
+
 /**
- * Singleton NER processing runner. The loop lives here instead of in the
- * Load-view section so runs survive view switches; UI subscribes for
- * progress and unsubscribes on unmount without stopping anything.
+ * Singleton processing runner: NER extraction, then category scoring as a
+ * post-NER step. The loop lives here instead of in the Load-view section
+ * so runs survive view switches; UI subscribes for progress and
+ * unsubscribes on unmount without stopping anything.
  *
  * Single-flight: at most one run exists, so Resume can never stack a second
  * run over the first. stop() invalidates synchronously, so a new run can
@@ -84,6 +141,7 @@ interface BatchResult {
  */
 class EntityProcessRunner {
   private status: "idle" | "running" = "idle";
+  private phase: ProcessPhase = "entities";
   private done = 0;
   private total = 0;
   private error: string | null = null;
@@ -95,6 +153,7 @@ class EntityProcessRunner {
   getSnapshot(): ProcessJobSnapshot {
     return {
       status: this.status,
+      phase: this.phase,
       done: this.done,
       total: this.total,
       error: this.error,
@@ -127,8 +186,14 @@ class EntityProcessRunner {
       args.baseHashes,
       args.serverVersion
     );
+    // Thread verdicts are independent of NER: one scoring call per
+    // thread, whatever its entity state.
+    const catQueue = buildThreadCategoryQueue(
+      args.items,
+      args.baseThreadCategories
+    );
     this.error = null;
-    if (queue.length === 0) {
+    if (queue.length === 0 && catQueue.length === 0) {
       this.notify();
       return true;
     }
@@ -136,11 +201,12 @@ class EntityProcessRunner {
     const controller = new AbortController();
     this.abort = controller;
     this.status = "running";
+    this.phase = queue.length > 0 ? "entities" : "categories";
     this.done = 0;
-    this.total = queue.length;
+    this.total = queue.length + catQueue.length;
     this.uuid = args.uuid;
     this.notify();
-    void this.loop(id, controller, args, queue);
+    void this.loop(id, controller, args, queue, catQueue);
     return true;
   }
 
@@ -157,12 +223,14 @@ class EntityProcessRunner {
     id: number,
     controller: AbortController,
     args: ProcessStartArgs,
-    queue: ProcessQueueItem[]
+    queue: ProcessQueueItem[],
+    catQueue: ProcessQueueItem[]
   ): Promise<void> {
     const alive = () => id === this.runId && this.status === "running";
     const batchSize = args.microBatch ?? MICRO_BATCH;
     let merged: ChatEntityMap = { ...args.baseMap };
     let hashes: ChatEntityHashMap = { ...args.baseHashes };
+    let cats: ThreadCategoryMap = { ...args.baseThreadCategories };
     try {
       for (let i = 0; i < queue.length; i += batchSize) {
         if (!alive() || controller.signal.aborted) return;
@@ -197,11 +265,60 @@ class EntityProcessRunner {
         }
         merged = { ...merged };
         hashes = { ...hashes, ...batchHashes };
-        // Persist here (not only in the UI): the section may be unmounted
-        // while a background run continues.
+        // Persist both stores here (not only in the UI): the section may
+        // be unmounted while a background run continues, and saving
+        // hashes directly while leaving the map to a UI effect desyncs
+        // the two under quota — hashes land, the map doesn't, and the
+        // count resets on refresh.
         saveChatEntityHashes(args.uuid, hashes);
+        saveChatEntities(args.uuid, merged);
         args.onBatch(merged, batchHashes);
-        this.done = Math.min(queue.length, i + slice.length);
+        this.done += slice.length;
+        this.notify();
+      }
+      // Phase 2: one verdict per thread. Slice ids are thread keys;
+      // server results join back by id, unknown ids are ignored.
+      this.phase = "categories";
+      this.notify();
+      const catBatchSize = args.microBatch ?? CATEGORY_MICRO_BATCH;
+      for (let i = 0; i < catQueue.length; i += catBatchSize) {
+        if (!alive() || controller.signal.aborted) return;
+        const slice = catQueue.slice(i, i + catBatchSize);
+        const hashById = new Map(slice.map((s) => [s.id, s.hash]));
+        const resp = await fetch("/api/classify-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            items: slice.map((s) => ({ id: s.id, text: s.text })),
+            labels: CATEGORY_LABELS,
+            // One category per thread: softmax the 8 labels, don't score
+            // each independently.
+            multiLabel: false,
+          }),
+          signal: controller.signal,
+        });
+        if (!alive()) return;
+        if (!resp.ok) {
+          const errData = await resp.json().catch(() => ({}));
+          throw new Error(errData.error || `HTTP ${resp.status}`);
+        }
+        const data = (await resp.json()) as {
+          results?: CategoryBatchResult[];
+        };
+        if (!alive()) return;
+        for (const r of data.results || []) {
+          const hash = hashById.get(r.id);
+          if (hash === undefined) continue;
+          cats[r.id] = {
+            hash,
+            version: THREAD_CATEGORY_VERSION,
+            scores: scoresToCategories(r.scores || {}),
+          };
+        }
+        cats = { ...cats };
+        saveThreadCategories(args.uuid, cats);
+        args.onCategories(cats);
+        this.done += slice.length;
         this.notify();
       }
     } catch (err: unknown) {

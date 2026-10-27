@@ -7,18 +7,29 @@ function MentionSearchBar({
   hasEntities,
   onViewChats,
   minScore = 0,
+  initialKeys = [],
+  noun = "threads",
 }: {
   entityMap: ChatEntityMap;
   hasEntities: boolean;
   onViewChats: (keys: string[]) => void;
   minScore?: number;
+  /** Entity keys to pre-populate as pills (e.g. arriving from a pill click). */
+  initialKeys?: string[];
+  /** What a search returns on this page (placeholder wording). */
+  noun?: string;
 }) {
   const candidates = useMemo(
     () => aggregateEntities(entityMap, 0, minScore),
     [entityMap, minScore]
   );
   const [query, setQuery] = useState("");
-  const [picked, setPicked] = useState<EntityAggregate[]>([]);
+  const [picked, setPicked] = useState<EntityAggregate[]>(() =>
+    initialKeys.flatMap((k) => {
+      const found = candidates.find((c) => c.key === k);
+      return found ? [found] : [];
+    })
+  );
   const [open, setOpen] = useState(false);
   const [hi, setHi] = useState(0);
   const pickedKeys = useMemo(() => picked.map((p) => p.key), [picked]);
@@ -73,10 +84,10 @@ function MentionSearchBar({
             }}
             placeholder={
               hasEntities
-                ? "Search mentions…"
-                : "Run NER processing to search mentions"
+                ? `Search ${noun} mentioning…`
+                : `Run NER processing to search ${noun}`
             }
-            aria-label="Search mentions"
+            aria-label={`Search ${noun} by mention`}
             className="flex-1 min-w-0 bg-transparent text-sm text-ink placeholder:text-mention/60 focus:outline-none disabled:opacity-60"
           />
           {query && (
@@ -141,11 +152,9 @@ function MentionSearchBar({
               key={p.key}
               type="button"
               onClick={() => {
-                setPicked((prev) => {
-                  const updated = prev.filter((k) => k.key !== p.key);
-                  onViewChats(updated.map((k) => k.key));
-                  return updated;
-                });
+                const updated = picked.filter((k) => k.key !== p.key);
+                setPicked(updated);
+                onViewChats(updated.map((k) => k.key));
               }}
               title={`Remove ${p.display}`}
               className="inline-flex items-center gap-1.5 rounded-full bg-mention px-3 py-1 text-xs font-medium text-white hover:bg-ink transition"

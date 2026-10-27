@@ -74,7 +74,7 @@ function ProcessingIndicator({
     return (
       <div
         className="px-3 pb-2"
-        title={`Processing chats ${job.done}/${job.total}`}
+        title={`Processing chats ${job.done}/${job.total} steps`}
       >
         <div className="h-1.5 rounded-full bg-tag overflow-hidden">
           <div
@@ -89,7 +89,8 @@ function ProcessingIndicator({
     <div className="mx-2 mb-2 rounded-xl border border-divider bg-tag px-3 py-2">
       <div className="flex items-center gap-2">
         <span className="text-[11px] font-medium text-ink flex-1 truncate">
-          Processing {job.done}/{job.total}
+          {job.phase === "categories" ? "Scoring" : "Processing"}{" "}
+          {job.done}/{job.total}
         </span>
         <button
           type="button"

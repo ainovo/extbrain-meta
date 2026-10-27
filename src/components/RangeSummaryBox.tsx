@@ -13,7 +13,13 @@ import {
   extractAbstract,
   updateSavedSummaryMarkdown,
 } from "../lib/savedSummaries";
-import { streamSynthesis } from "../lib/synthesize";
+import {
+  SynthesisPlan,
+  formatSynthesisWarning,
+  planSynthesis,
+  streamSynthesis,
+  synthesisNeedsConfirm,
+} from "../lib/synthesize";
 import { filterItemsByRange } from "../lib/topOfMind";
 import {
   InteractiveSummaryMarkdown,
@@ -97,6 +103,8 @@ export const RangeSummaryBox: React.FC<Props> = ({
   );
   const [progressNote, setProgressNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Non-null while a large run waits for explicit confirmation. */
+  const [confirmPlan, setConfirmPlan] = useState<SynthesisPlan | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const markdownRef = useRef("");
   markdownRef.current = markdown;
@@ -128,8 +136,17 @@ export const RangeSummaryBox: React.FC<Props> = ({
     if (savedId) updateSavedSummaryMarkdown(uuid, savedId, next);
   };
 
-  const generate = async () => {
+  const generate = async (confirmed = false) => {
     if (effectiveItems.length === 0 || abortRef.current) return;
+    if (!confirmed) {
+      const plan = planSynthesis(effectiveItems, maxTokensPerBatch);
+      if (synthesisNeedsConfirm(plan)) {
+        setConfirmPlan(plan);
+        setStatus("idle");
+        return;
+      }
+    }
+    setConfirmPlan(null);
     const controller = new AbortController();
     abortRef.current = controller;
     setStatus("generating");
@@ -274,6 +291,31 @@ export const RangeSummaryBox: React.FC<Props> = ({
             Model settings
           </button>
         </p>
+      )}
+      {confirmPlan && status !== "generating" && (
+        <div className="rounded-lg border border-divider bg-tag p-3 space-y-2">
+          <p className="text-xs text-ink leading-relaxed">
+            {formatSynthesisWarning(confirmPlan, {
+              tip: "Narrow the date range or pick a smaller bucket to speed it up.",
+            })}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void generate(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-action px-3 py-1.5 text-xs font-medium text-white hover:bg-action-hover transition"
+            >
+              Generate anyway
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmPlan(null)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-divider bg-white px-3 py-1.5 text-xs font-medium text-ink hover:bg-tag transition"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       )}
       {markdown && (
         <InteractiveSummaryMarkdown

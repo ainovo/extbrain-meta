@@ -1,3 +1,9 @@
+import {
+  decodeStoredJson,
+  encodeCompressedJson,
+  setStoredItem,
+} from "./compressedJson";
+
 export interface ExtractedEntity {
   /** Display form as found in the chat text. */
   name: string;
@@ -25,11 +31,12 @@ const keyFor = (uuid: string) => `sb_entities_${uuid}`;
 
 export function loadChatEntities(uuid: string): ChatEntityMap {
   try {
-    const raw = localStorage.getItem(keyFor(uuid));
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
+    const parsed = decodeStoredJson(localStorage.getItem(keyFor(uuid)));
     if (!parsed || typeof parsed !== "object") return {};
     // Migrate entities stored before WordPiece "##" cleanup was added.
+    // Empty verdicts are KEPT: a stored [] means NER ran and found nothing,
+    // which is processed — dropping it here makes the chat requeue on every
+    // load (in-session it counts as done, refresh resurrects it).
     const cleaned: ChatEntityMap = {};
     for (const [chatId, ents] of Object.entries(parsed as ChatEntityMap)) {
       const fixed = (ents || [])
@@ -39,7 +46,7 @@ export function loadChatEntities(uuid: string): ChatEntityMap {
           ...(typeof e?.score === "number" ? { score: e.score } : {}),
         }))
         .filter((e) => e.name.length >= 2);
-      if (fixed.length > 0) cleaned[chatId] = fixed;
+      cleaned[chatId] = fixed;
     }
     return cleaned;
   } catch {
@@ -47,12 +54,33 @@ export function loadChatEntities(uuid: string): ChatEntityMap {
   }
 }
 
-export function saveChatEntities(uuid: string, map: ChatEntityMap): void {
+/** Stored-format diagnostics for the entity map (quota debugging). */
+export function entityStorageInfo(uuid: string): {
+  kb: number;
+  format: "gz" | "raw" | "missing";
+} {
   try {
-    localStorage.setItem(keyFor(uuid), JSON.stringify(map));
+    const raw = localStorage.getItem(keyFor(uuid)) ?? "";
+    return {
+      kb: Math.round(raw.length / 1024),
+      format: !raw ? "missing" : raw.startsWith("gz1:") ? "gz" : "raw",
+    };
   } catch {
-    // Quota or privacy mode: entities stay in memory for the session.
+    return { kb: 0, format: "missing" };
   }
+}
+
+export function saveChatEntities(uuid: string, map: ChatEntityMap): boolean {
+  const payload = encodeCompressedJson(map);
+  const ok = setStoredItem(keyFor(uuid), payload);
+  if (!ok) {
+    // Quota or privacy mode: entities stay in memory for the session.
+    // Loud on purpose — silent loss here looks exactly like stuck progress.
+    console.error(
+      `[extbrain] failed to persist ${payload.length} bytes of entities`
+    );
+  }
+  return ok;
 }
 
 /**
@@ -125,9 +153,7 @@ function normalizeHashEntry(raw: unknown): ChatEntityHash | null {
 
 export function loadChatEntityHashes(uuid: string): ChatEntityHashMap {
   try {
-    const raw = localStorage.getItem(hashKeyFor(uuid));
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
+    const parsed = decodeStoredJson(localStorage.getItem(hashKeyFor(uuid)));
     if (!parsed || typeof parsed !== "object") return {};
     const out: ChatEntityHashMap = {};
     for (const [id, e] of Object.entries(parsed)) {
@@ -140,12 +166,15 @@ export function loadChatEntityHashes(uuid: string): ChatEntityHashMap {
   }
 }
 
-export function saveChatEntityHashes(uuid: string, map: ChatEntityHashMap): void {
-  try {
-    localStorage.setItem(hashKeyFor(uuid), JSON.stringify(map));
-  } catch {
-    // ignore
+export function saveChatEntityHashes(uuid: string, map: ChatEntityHashMap): boolean {
+  const payload = encodeCompressedJson(map);
+  const ok = setStoredItem(hashKeyFor(uuid), payload);
+  if (!ok) {
+    console.error(
+      `[extbrain] failed to persist ${payload.length} bytes of entity hashes`
+    );
   }
+  return ok;
 }
 
 /**

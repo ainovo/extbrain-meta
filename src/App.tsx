@@ -17,9 +17,13 @@ import { Tagging } from "./components/Tagging";
 import {
   ChatEntityMap,
   loadChatEntities,
-  normalizeEntityKey,
   saveChatEntities,
 } from "./lib/entities";
+import {
+  ThreadCategoryMap,
+  loadThreadCategories,
+  saveThreadCategories,
+} from "./lib/categoryTags";
 import { SummaryGenerator } from "./components/SummaryGenerator";
 import { ActionItemsView } from "./components/ActionItemsView";
 import {
@@ -31,7 +35,11 @@ import {
   taggedChatIds,
 } from "./lib/tags";
 import { SettingsView } from "./components/SettingsView";
-import { filterItemsByRange } from "./lib/topOfMind";
+import {
+  filterChatsByEntities,
+  filterItemsByEntities,
+  filterItemsByRange,
+} from "./lib/topOfMind";
 import { TopOfMind } from "./components/TopOfMind";
 import { UrlPreviewLayer } from "./components/UrlPreviewLayer";
 
@@ -81,6 +89,7 @@ export const App: React.FC = () => {
   const [selectedIds] = useState<Set<string>>(new Set());
   const [tags, setTags] = useState<TagDef[]>(() => loadTags(uuid));
   const [chatEntities, setChatEntities] = useState<ChatEntityMap>(() => loadChatEntities(uuid));
+  const [threadCategories, setThreadCategories] = useState<ThreadCategoryMap>(() => loadThreadCategories(uuid));
   const [activeEntities, setActiveEntities] = useState<string[]>([]);
   const [activeDateRange, setActiveDateRange] = useState<{
     start: string;
@@ -136,7 +145,7 @@ export const App: React.FC = () => {
   // A restore writes storage itself; each echo re-persist is skipped once
   // so restored bytes (and file names) survive untouched. Model config is
   // excluded: restore never writes it, so its effect must persist the merge.
-  const skipPersistRef = useRef({ items: false, tags: false, entities: false });
+  const skipPersistRef = useRef({ items: false, tags: false, entities: false, categories: false });
   // Persist on change (debounced by effect)
   useEffect(() => {
     if (!hydrated) return;
@@ -190,6 +199,14 @@ export const App: React.FC = () => {
     saveChatEntities(uuid, chatEntities);
   }, [chatEntities, uuid]);
 
+  useEffect(() => {
+    if (skipPersistRef.current.categories) {
+      skipPersistRef.current.categories = false;
+      return;
+    }
+    saveThreadCategories(uuid, threadCategories);
+  }, [threadCategories, uuid]);
+
   // Search index builds only while a query is active (it lowercases the
   // full corpus, so building it on every load blocks restore/import); the
   // boolean dep keeps keystrokes from rebuilding it.
@@ -223,12 +240,7 @@ export const App: React.FC = () => {
       );
     }
     if (activeEntities.length > 0) {
-      const wanted = new Set(activeEntities);
-      return items.filter((it) =>
-        (chatEntities[it.id] || []).some((e) =>
-          wanted.has(normalizeEntityKey(e.name))
-        )
-      );
+      return filterChatsByEntities(items, chatEntities, activeEntities);
     }
     if (activeTags.length > 0) {
       const ids = new Set<string>();
@@ -246,6 +258,15 @@ export const App: React.FC = () => {
       (it) => (it.threadUrl || it.titleUrl || null) === focusedThread
     );
   }, [baseVisibleItems, focusedThread]);
+
+  // Threads page: same filters, but entity matches expand to whole threads
+  // (date range keeps precedence, as in baseVisibleItems).
+  const threadVisibleItems = useMemo(() => {
+    if (activeEntities.length > 0 && !activeDateRange) {
+      return filterItemsByEntities(items, chatEntities, activeEntities);
+    }
+    return baseVisibleItems;
+  }, [items, chatEntities, activeEntities, activeDateRange, baseVisibleItems]);
 
   const focusedThreadTitle = useMemo(() => {
     if (!focusedThread) return null;
@@ -356,6 +377,7 @@ export const App: React.FC = () => {
             <TopOfMind
               items={items}
               entityMap={chatEntities}
+              categoryMap={threadCategories}
               minScore={modelConfig.nerScoreFloor ?? 0}
               uuid={uuid}
               onOpenThread={openThread}
@@ -365,7 +387,7 @@ export const App: React.FC = () => {
                 setActiveEntities(keys);
                 setActiveDateRange(null);
                 setFocusedThread(null);
-                setView("chat");
+                setView("threads");
               }}
               onReadArchives={(start, end) => {
                 setQuery("");
@@ -402,10 +424,12 @@ export const App: React.FC = () => {
                     items: true,
                     tags: true,
                     entities: true,
+                    categories: true,
                   };
                   handleItemsLoaded(result.items, true);
                   setTags(result.tags);
                   setChatEntities(result.entities);
+                  setThreadCategories(result.categories);
                   setModelConfig(result.modelConfig);
                 }}
               />
@@ -415,6 +439,8 @@ export const App: React.FC = () => {
                 entityMap={chatEntities}
                 minScore={modelConfig.nerScoreFloor ?? 0}
                 onEntitiesChange={setChatEntities}
+                categoryMap={threadCategories}
+                onCategoriesChange={setThreadCategories}
               />
             </div>
           )}
@@ -470,12 +496,20 @@ export const App: React.FC = () => {
 
           {view === "threads" && (
             <ThreadsView
-              items={baseVisibleItems}
+              items={threadVisibleItems}
               entityMap={chatEntities}
               minScore={modelConfig.nerScoreFloor ?? 0}
               onOpenThread={openThread}
               activeDateRange={activeDateRange}
               onClearDateRange={() => setActiveDateRange(null)}
+              activeEntities={activeEntities}
+              onSelectEntities={(keys) => {
+                setQuery("");
+                setActiveTagIds([]);
+                setActiveEntities(keys);
+                setActiveDateRange(null);
+                setFocusedThread(null);
+              }}
             />
           )}
 

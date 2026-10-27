@@ -67,6 +67,51 @@ export function dataDayBounds(
   return { minKey, maxKey };
 }
 
+function chatMentionsAny(
+  entityMap: ChatEntityMap,
+  chatId: string,
+  wanted: Set<string>
+): boolean {
+  return (entityMap[chatId] || []).some(
+    (e) =>
+      e && typeof e.name === "string" && wanted.has(normalizeEntityKey(e.name))
+  );
+}
+
+/** Chats mentioning ANY wanted entity (no thread expansion). */
+export function filterChatsByEntities(
+  items: ParsedActivityItem[],
+  entityMap: ChatEntityMap,
+  keys: string[]
+): ParsedActivityItem[] {
+  const wanted = new Set(keys);
+  return items.filter((it) => chatMentionsAny(entityMap, it.id, wanted));
+}
+
+/**
+ * Thread-expanding entity filter: keep every chat of each thread with at
+ * least one chat mentioning any wanted entity, so results read as whole
+ * conversations. Keyless chats mentioning one are kept directly — they
+ * belong to no thread to expand.
+ */
+export function filterItemsByEntities(
+  items: ParsedActivityItem[],
+  entityMap: ChatEntityMap,
+  keys: string[]
+): ParsedActivityItem[] {
+  const wanted = new Set(keys);
+  const hitThreads = new Set<string>();
+  for (const it of items) {
+    if (!chatMentionsAny(entityMap, it.id, wanted)) continue;
+    const k = threadKeyOf(it);
+    if (k) hitThreads.add(k);
+  }
+  return items.filter((it) => {
+    const k = threadKeyOf(it);
+    return k ? hitThreads.has(k) : chatMentionsAny(entityMap, it.id, wanted);
+  });
+}
+
 /** Chats whose local day falls inside [startKey, endKey] (inclusive). */
 export function filterItemsByRange(
   items: ParsedActivityItem[],

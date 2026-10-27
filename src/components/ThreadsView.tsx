@@ -20,6 +20,9 @@ interface ThreadsViewProps {
   activeDateRange?: { start: string; end: string } | null;
   onClearDateRange?: () => void;
   minScore?: number;
+  /** Entity filter owned by App (pre-applied to items, thread-expanded). */
+  activeEntities: string[];
+  onSelectEntities: (keys: string[]) => void;
 }
 
 function fmtDay(iso: string): string {
@@ -50,9 +53,10 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
   activeDateRange,
   onClearDateRange,
   minScore = 0,
+  activeEntities,
+  onSelectEntities,
 }) => {
   const [sort, setSort] = useState<SortMode>("chatted");
-  const [pickedMentions, setPickedMentions] = useState<string[]>([]);
   const [renderCount, setRenderCount] = useState(PAGE_SIZE);
   const observerRef = useRef<IntersectionObserver | null>(null);
 
@@ -80,15 +84,12 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
       }
       return b.endIso.localeCompare(a.endIso);
     });
-    if (pickedMentions.length === 0) return list;
-    return list.filter((t) =>
-      t.topMentions.some((m) => pickedMentions.includes(m.key))
-    );
-  }, [withMentions, sort, pickedMentions]);
+    return list;
+  }, [withMentions, sort]);
 
   useEffect(() => {
     setRenderCount(PAGE_SIZE);
-  }, [sort, pickedMentions, threads]);
+  }, [sort, threads]);
 
   const totalRef = useRef(sortedThreads.length);
   totalRef.current = sortedThreads.length;
@@ -179,21 +180,22 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
         </div>
       )}
 
-      {threads.length > 0 && (
+      {(threads.length > 0 || activeEntities.length > 0) && (
         <MentionSearchBar
           entityMap={entityMap}
           hasEntities={Boolean(Object.keys(entityMap).length)}
-          onViewChats={setPickedMentions}
+          onViewChats={onSelectEntities}
           minScore={minScore}
+          initialKeys={activeEntities}
         />
       )}
 
        {sortedThreads.length === 0 ? (
         <div className="text-center text-sm text-mention/60 py-16">
-          {items.length === 0
-            ? "No chats loaded yet."
-            : pickedMentions.length > 0
+          {activeEntities.length > 0
             ? "No threads mention the selected entities."
+            : items.length === 0
+            ? "No chats loaded yet."
             : "No threads here — none of these chats carry a source link."}
         </div>
       ) : (

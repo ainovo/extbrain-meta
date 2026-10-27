@@ -290,6 +290,40 @@ export async function classifySingleTextWithModernBert(
   return scoreMap;
 }
 
+function zeroShotEntryToScores(entry: unknown): Record<string, number> {
+  const scoreMap: Record<string, number> = {};
+  const single = entry as { labels?: unknown; scores?: unknown };
+  if (
+    single &&
+    Array.isArray(single.labels) &&
+    Array.isArray(single.scores)
+  ) {
+    for (let i = 0; i < single.labels.length; i++) {
+      scoreMap[single.labels[i] as string] = single.scores[i] as number;
+    }
+  }
+  return scoreMap;
+}
+
+/**
+ * Normalize one batched zero-shot pipeline call (array of texts in) to one
+ * score map per input, in order. Returns null when the output shape
+ * doesn't match the input count — callers fall back to one call per chat
+ * rather than risk misaligned scores.
+ */
+export function normalizeZeroShotBatch(
+  output: unknown,
+  count: number
+): Array<Record<string, number>> | null {
+  if (count <= 0) return [];
+  if (count === 1) {
+    const single = Array.isArray(output) ? output[0] ?? output : output;
+    return [zeroShotEntryToScores(single)];
+  }
+  if (!Array.isArray(output) || output.length !== count) return null;
+  return output.map(zeroShotEntryToScores);
+}
+
 // ============================================================================
 // Asymmetric Context Packing for Step 4 Synthesis
 // ============================================================================

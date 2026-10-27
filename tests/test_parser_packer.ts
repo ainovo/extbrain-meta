@@ -21,6 +21,8 @@ import {
   buildRangeStats,
   countThreadsBySource,
   dataDayBounds,
+  filterChatsByEntities,
+  filterItemsByEntities,
   filterItemsByRange,
   formatDayRangeLabel,
   formatDuration,
@@ -39,14 +41,33 @@ import {
 } from "../src/lib/urlPreview";
 import { summarizeThreads } from "../src/lib/threads";
 import { inDateRange, taggedChatIds, type TagDef } from "../src/lib/tags";
-import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, nerWordRuns, projectTextAlnum, recoverSpanText, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
+import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
 import {
   buildEntryClassificationText,
   classifySingleTextWithModernBert,
   filterAndRankByTargetContrast,
+  normalizeZeroShotBatch,
   packItemsIntoBatches,
 } from "../src/lib/retrievalEngine";
 import { ParsedActivityItem, RawTakeoutEntry } from "../src/lib/types";
+import {
+  SYNTHESIS_WARN_BYTES,
+  extractionConcurrencyFor,
+  formatBytes,
+  formatSynthesisWarning,
+  mapWithConcurrency,
+  planSynthesis,
+  retryDelayMs,
+  synthesisNeedsConfirm,
+} from "../src/lib/synthesize";
+import {
+  decodeStoredJson,
+  encodeCompressedJson,
+  getPersistOutcomeVersion,
+  lastPersistError,
+  setStoredItem,
+  subscribePersistOutcome,
+} from "../src/lib/compressedJson";
 import { SavedSummary } from "../src/lib/savedSummaries";
 import JSZip from "jszip";
 import {
@@ -57,9 +78,29 @@ import {
   restoreBackup,
   type ExportPayload,
 } from "../src/lib/exportData";
-import { buildProcessQueue, processRunner } from "../src/lib/processRunner";
+import {
+  buildProcessQueue,
+  buildThreadCategoryQueue,
+  processRunner,
+} from "../src/lib/processRunner";
+import {
+  CATEGORY_LABELS,
+  CATEGORY_TAXONOMY,
+  THREAD_CATEGORY_VERSION,
+  ThreadCategoryMap,
+  CategoryId,
+  ThreadCategoryRecord,
+  buildCategoryScoringText,
+  buildThreadScoringText,
+  categoryLabelFor,
+  loadThreadCategories,
+  normalizeThreadCategoryMap,
+  saveThreadCategories,
+  scoresToCategories,
+  threadNeedsCategoryScoring,
+  topCategory,
+} from "../src/lib/categoryTags";
 import { loadTags } from "../src/lib/tags";
-import { loadChatEntities } from "../src/lib/entities";
 import { loadCustomThreadTemplates } from "../src/lib/promptTemplates";
 import { loadSavedSummaries } from "../src/lib/savedSummaries";
 import { BUILTIN_TEMPLATES } from "../src/lib/promptTemplates";
@@ -265,6 +306,37 @@ async function runTests() {
   assert(
     !keptTitles.some((t) => t.includes("carrier package")),
     "Filtered out unrelated shipping chat (max_contrast > max_target)"
+  );
+
+  const zsBatch = normalizeZeroShotBatch(
+    [
+      { labels: ["a", "b"], scores: [0.9, 0.1] },
+      { labels: ["a", "b"], scores: [0.2, 0.8] },
+    ],
+    2
+  );
+  assert(
+    zsBatch !== null &&
+      zsBatch.length === 2 &&
+      zsBatch[0].a === 0.9 &&
+      zsBatch[1].b === 0.8,
+    "normalizeZeroShotBatch maps one score map per input, in order"
+  );
+  const zsSingle = normalizeZeroShotBatch(
+    { labels: ["a"], scores: [0.5] },
+    1
+  );
+  assert(
+    zsSingle !== null &&
+      zsSingle.length === 1 &&
+      zsSingle[0].a === 0.5 &&
+      normalizeZeroShotBatch([], 0)?.length === 0,
+    "normalizeZeroShotBatch accepts single and empty outputs"
+  );
+  assert(
+    normalizeZeroShotBatch([{ labels: ["a"], scores: [1] }], 2) === null &&
+      normalizeZeroShotBatch({ labels: ["a"], scores: [1] }, 3) === null,
+    "normalizeZeroShotBatch rejects shape mismatches so callers fall back"
   );
 
   const packed = packItemsIntoBatches(
@@ -1142,6 +1214,140 @@ async function runTests() {
         legendSums.length,
     "countThreadsBySource counts each thread once under its oldest chat so the legend reconciles with the subtitle"
   );
+  // e2 shares thread-hit with e1 but mentions nothing: expansion must keep
+  // it anyway. e4 is a keyless direct hit; e3/e5 match nothing.
+  const expItems = [
+    mkItem("e1", isoDaysAgo(2), "thread-hit", "ChatGPT", "alice here"),
+    mkItem("e2", isoDaysAgo(1), "thread-hit", "ChatGPT", "no entity here"),
+    mkItem("e3", isoDaysAgo(0), "thread-miss", "ChatGPT", "nothing"),
+    mkItem("e4", isoDaysAgo(0), undefined, "ChatGPT", "keyless alice"),
+    mkItem("e5", isoDaysAgo(0), undefined, "ChatGPT", "keyless nothing"),
+  ];
+  const expMap: ChatEntityMap = {
+    e1: [{ name: "Alice", type: "PER" }],
+    e4: [{ name: "Alice", type: "PER" }],
+  };
+  const aliceKey = normalizeEntityKey("Alice");
+  const expanded = filterItemsByEntities(expItems, expMap, [aliceKey]);
+  assert(
+    expanded.length === 3 &&
+      expanded.some((it) => it.id === "e1") &&
+      expanded.some((it) => it.id === "e2") &&
+      expanded.some((it) => it.id === "e4"),
+    "filterItemsByEntities keeps whole hit threads plus keyless hits, drops the rest"
+  );
+  const expMap2: ChatEntityMap = {
+    ...expMap,
+    e3: [{ name: "Bob", type: "PER" }],
+  };
+  const expandedOr = filterItemsByEntities(expItems, expMap2, [
+    aliceKey,
+    normalizeEntityKey("Bob"),
+  ]);
+  assert(
+    expandedOr.length === 4 &&
+      expandedOr.every((it) => it.id !== "e5") &&
+      filterItemsByEntities(expItems, expMap2, []).length === 0,
+    "filterItemsByEntities matches ANY of several entities and selects nothing for no keys"
+  );
+  // Chat-level mirror: e2 shares the hit thread but mentions nothing, so
+  // the chats page drops it while keeping the direct hits.
+  const chatLevel = filterChatsByEntities(expItems, expMap, [aliceKey]);
+  assert(
+    chatLevel.length === 2 &&
+      chatLevel.some((it) => it.id === "e1") &&
+      chatLevel.some((it) => it.id === "e4"),
+    "filterChatsByEntities keeps only chats that mention the entity"
+  );
+  // Tiny token budget forces one batch per chat; the production budget
+  // packs the same chats into a single small batch.
+  const bigPlan = planSynthesis(expItems, 1);
+  const smallPlan = planSynthesis(expItems, 1e9);
+  assert(
+    bigPlan.batchCount === expItems.length &&
+      bigPlan.totalBytes > 0 &&
+      bigPlan.totalTokens === smallPlan.totalTokens &&
+      smallPlan.batchCount === 1,
+    "planSynthesis reports batch count, bytes, and tokens up front"
+  );
+  assert(
+    synthesisNeedsConfirm(bigPlan) === true &&
+      synthesisNeedsConfirm(smallPlan) === false &&
+      synthesisNeedsConfirm({
+        batches: ["x"],
+        batchCount: 1,
+        totalBytes: SYNTHESIS_WARN_BYTES,
+        totalTokens: 1,
+      }) === false &&
+      synthesisNeedsConfirm({
+        batches: ["x"],
+        batchCount: 1,
+        totalBytes: SYNTHESIS_WARN_BYTES + 1,
+        totalTokens: 1,
+      }) === true,
+    "synthesisNeedsConfirm fires on multi-batch runs or >512KB singles"
+  );
+  assert(
+    formatBytes(2875 * 1024) === "2.8 MB" &&
+      formatBytes(960 * 1024) === "960 KB" &&
+      formatBytes(512) === "512 B",
+    "formatBytes compacts byte counts to B/KB/MB"
+  );
+  const warnPlan = {
+    batches: ["a", "b", "c"],
+    batchCount: 3,
+    totalBytes: 2875 * 1024,
+    totalTokens: 720000,
+  };
+  assert(
+    formatSynthesisWarning(warnPlan) ===
+      "Large selection: ~2.8 MB in 3 requests (~720K tokens). This may take several minutes." &&
+      formatSynthesisWarning(warnPlan, { noun: "thread" }).startsWith(
+        "Large thread: ~2.8 MB in 3 requests"
+      ) &&
+      formatSynthesisWarning(
+        { batches: ["a"], batchCount: 1, totalBytes: 600 * 1024, totalTokens: 150000 },
+        { tip: "Narrow it." }
+      ) ===
+        "Large selection: ~600 KB in 1 request (~150K tokens). This may take several minutes. Narrow it.",
+    "formatSynthesisWarning states real size, requests, and tokens"
+  );
+  // Varying delays finish out of order; results must still line up with
+  // inputs while never exceeding 2 in flight.
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const ordered = await mapWithConcurrency([30, 10, 20, 0], 2, async (ms, i) => {
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((r) => setTimeout(r, ms));
+    inFlight--;
+    return `r${i}`;
+  });
+  const emptyPool = await mapWithConcurrency([], 3, async () => 1);
+  assert(
+    ordered.join(",") === "r0,r1,r2,r3" &&
+      maxInFlight === 2 &&
+      emptyPool.length === 0,
+    "mapWithConcurrency keeps input order and caps in-flight work"
+  );
+  assert(
+    extractionConcurrencyFor("muse-spark-1.3-contributor") === 3 &&
+      extractionConcurrencyFor("muse-spark-1.2-contributor") === 3 &&
+      extractionConcurrencyFor("muse-spark-1.3") === 4 &&
+      extractionConcurrencyFor("muse-wonder-1.0") === 4,
+    "extraction fan-out follows the model's rate-limit tier"
+  );
+  const backoff0 = retryDelayMs(0, null);
+  const backoff1 = retryDelayMs(1, null);
+  assert(
+    backoff0 >= 500 &&
+      backoff0 < 1000 &&
+      backoff1 >= 1000 &&
+      backoff1 < 1500 &&
+      retryDelayMs(0, 5) === 5000 &&
+      retryDelayMs(2, 1) >= 2000,
+    "retryDelayMs doubles 500ms with jitter and honors Retry-After"
+  );
 
   const spanItems = [
     mkItem("span-old", isoDaysAgo(60), "thread-span", "ChatGPT", "very first"),
@@ -1681,6 +1887,22 @@ async function runTests() {
       },
     ],
     entities: { c1: [{ name: "Ada", type: "PER" }] },
+    categories: {
+      "thread-a": {
+        hash: "h1",
+        version: 1,
+        scores: {
+          productivity: 0.9,
+          finance: 0,
+          social: 0,
+          entertainment: 0,
+          health: 0,
+          travel: 0,
+          utilities: 0,
+          education: 0,
+        },
+      },
+    },
     templates: [
       {
         id: "ct1",
@@ -1705,6 +1927,7 @@ async function runTests() {
     JSON.stringify(exportFiles) ===
       JSON.stringify(
         [
+          "thread-categories.json",
           "custom-templates.json",
           "entities.json",
           "histories.json",
@@ -1723,6 +1946,7 @@ async function runTests() {
     manifest.userid === "u1" &&
       manifest.counts?.histories === 1 &&
       manifest.counts?.summaries === 1 &&
+      manifest.counts?.categories === 1 &&
       Array.isArray(manifest.fileNames),
     "export manifest records the user, counts, and source files"
   );
@@ -1746,6 +1970,7 @@ async function runTests() {
       roundTrip.summaries.length === 1 &&
       roundTrip.tags.length === 1 &&
       Object.keys(roundTrip.entities).length === 1 &&
+      Object.keys(roundTrip.categories).length === 1 &&
       roundTrip.templates.length === 1 &&
       roundTrip.modelConfig.discovery.provider === "meta" &&
       roundTrip.modelConfig.discovery.model === "muse-spark-1.3" &&
@@ -1807,6 +2032,7 @@ async function runTests() {
         loadSavedSummaries("u9").length === 1 &&
         loadTags("u9").length === 1 &&
         Object.keys(loadChatEntities("u9")).length === 1 &&
+        Object.keys(loadThreadCategories("u9")).length === 1 &&
         loadCustomThreadTemplates().length === 1,
       "restoreBackup replaces every store and takes the backup model config"
     );
@@ -1849,7 +2075,11 @@ async function runTests() {
     "normalizeModelConfig defaults batches to 1M and migrates the legacy 45k default"
   );
 
-  const procItem = (id: string, timestamp: string): ParsedActivityItem => ({
+  const procItem = (
+    id: string,
+    timestamp: string,
+    threadUrl?: string
+  ): ParsedActivityItem => ({
     id,
     sourceFile: "f.json",
     header: "h",
@@ -1865,11 +2095,12 @@ async function runTests() {
     extractedEntities: [],
     estimatedFullTokens: 0,
     estimatedPackedTokens: 0,
+    threadUrl,
   });
   const procItems = [
-    procItem("old", "2024-01-01T00:00:00Z"),
-    procItem("new", "2025-06-01T00:00:00Z"),
-    procItem("mid", "2024-06-01T00:00:00Z"),
+    procItem("old", "2024-01-01T00:00:00Z", "thread-a"),
+    procItem("new", "2025-06-01T00:00:00Z", "thread-b"),
+    procItem("mid", "2024-06-01T00:00:00Z", "thread-a"),
     procItem("undated", ""),
   ];
   assert(
@@ -1890,11 +2121,424 @@ async function runTests() {
     "buildProcessQueue skips chats whose stored record is current"
   );
 
-  const realFetch = (globalThis as Record<string, unknown>).fetch;
-  (globalThis as Record<string, unknown>).fetch = async () => ({
-    ok: true,
-    json: async () => ({ results: [] }),
+  // === Category taxonomy ===
+  assert(
+    CATEGORY_TAXONOMY.length === 8 &&
+      new Set(CATEGORY_TAXONOMY.map((c) => c.id)).size === 8 &&
+      CATEGORY_LABELS.length === 8 &&
+      CATEGORY_LABELS.every((l) => !l.includes(" ")) &&
+      CATEGORY_TAXONOMY.every((c) => c.description.length > 0),
+    "taxonomy stores 8 one-word category labels with descriptions"
+  );
+  const catScores = scoresToCategories({
+    productivity: 0.9,
+    finance: 0.95,
   });
+  assert(
+    catScores.productivity === 0.9 &&
+      catScores.finance === 0.95 &&
+      catScores.social === 0 &&
+      topCategory(catScores) === "finance" &&
+      scoresToCategories({ finance: 0.123456 }).finance === 0.1235,
+    "scoresToCategories reads each one-word label; topCategory picks the argmax"
+  );
+  assert(
+    topCategory(scoresToCategories({})) === "productivity",
+    "topCategory breaks all-zero ties by taxonomy order"
+  );
+  const csItem: ParsedActivityItem = {
+    ...procItem("cs", "2025-01-01T00:00:00Z"),
+    turns: [
+      {
+        prompt: "how do I move money",
+        responseMarkdown:
+          "Open your banking app to start. Then confirm the transfer on the next screen.",
+        responseSummary: "",
+        extractedEntities: [],
+      },
+    ],
+  };
+  const csText = buildCategoryScoringText(csItem);
+  assert(
+    csText.includes("prompt cs") &&
+      csText.includes("Open your banking app to start.") &&
+      !csText.includes("confirm the transfer"),
+    "buildCategoryScoringText keeps the prompt plus the first response sentence only"
+  );
+  const csEmpty: ParsedActivityItem = {
+    ...procItem("cse", "2025-01-01T00:00:00Z"),
+    turns: [
+      {
+        prompt: "hi",
+        responseMarkdown: "",
+        responseSummary: "",
+        extractedEntities: [],
+      },
+    ],
+  };
+  const csLong: ParsedActivityItem = {
+    ...procItem("csl", "2025-01-01T00:00:00Z"),
+    turns: [
+      {
+        prompt: "hi",
+        responseMarkdown: `Is this ok? ${"word ".repeat(200)}`,
+        responseSummary: "",
+        extractedEntities: [],
+      },
+    ],
+  };
+  assert(
+    buildCategoryScoringText(csEmpty).includes("prompt cse") &&
+      buildCategoryScoringText(csLong).includes("Is this ok?") &&
+      !buildCategoryScoringText(csLong).includes("word word word") &&
+      buildCategoryScoringText(csLong).length < 800,
+    "buildCategoryScoringText tolerates empty responses and caps run-ons"
+  );
+  const threadRec = (
+    part: Partial<Record<CategoryId, number>>,
+    hash = "h"
+  ): ThreadCategoryRecord => ({
+    hash,
+    version: THREAD_CATEGORY_VERSION,
+    scores: {
+      productivity: 0,
+      finance: 0,
+      social: 0,
+      entertainment: 0,
+      health: 0,
+      travel: 0,
+      utilities: 0,
+      education: 0,
+      ...part,
+    },
+  });
+  const catThreadSums = summarizeThreads(procItems);
+  const threadText = buildThreadScoringText(
+    catThreadSums.find((t) => t.key === "thread-a")!.chats
+  );
+  assert(
+    catThreadSums.map((t) => t.key).join(",") === "thread-b,thread-a" &&
+      threadText.includes("prompt old") &&
+      threadText.includes("prompt mid") &&
+      threadText.length <= 800 &&
+      categoryLabelFor("finance") === "Finance",
+    "buildThreadScoringText joins thread chats oldest-first under the cap"
+  );
+  assert(
+    threadNeedsCategoryScoring({ entry: undefined, hash: "h" }) === true &&
+      threadNeedsCategoryScoring({ entry: threadRec({}, "h"), hash: "h" }) ===
+        false &&
+      threadNeedsCategoryScoring({
+        entry: { ...threadRec({}, "h"), version: 0 },
+        hash: "h",
+      }) === true &&
+      threadNeedsCategoryScoring({
+        entry: threadRec({}, "other"),
+        hash: "h",
+      }) === true,
+    "threadNeedsCategoryScoring refires on missing, stale-text, or outdated verdicts"
+  );
+  const normCats = normalizeThreadCategoryMap({
+    good: threadRec({ finance: 0.7 }),
+    bad: { nope: 1 },
+    sloppy: { hash: "h", version: 1, scores: { finance: "high" } },
+  });
+  assert(
+    Object.keys(normCats).join(",") === "good,sloppy" &&
+      normCats.good.scores.finance === 0.7 &&
+      normCats.sloppy.scores.finance === 0 &&
+      Object.keys(normalizeThreadCategoryMap(undefined)).length === 0,
+    "normalizeThreadCategoryMap drops malformed verdicts and tolerates old backups"
+  );
+  const catStore = new Map<string, string>();
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: (k: string) => (catStore.has(k) ? catStore.get(k)! : null),
+    setItem: (k: string, v: string) => {
+      catStore.set(k, String(v));
+    },
+    removeItem: (k: string) => {
+      catStore.delete(k);
+    },
+  };
+  try {
+    saveThreadCategories("uc", { "thread-a": threadRec({ finance: 0.7 }) });
+    assert(
+      loadThreadCategories("uc")["thread-a"]?.scores.finance === 0.7 &&
+        Object.keys(loadThreadCategories("other")).length === 0,
+      "thread verdicts persist per dataset"
+    );
+  } finally {
+    delete (globalThis as Record<string, unknown>).localStorage;
+  }
+  // === Compressed storage ===
+  const rtPayload = {
+    text: "héllo wörld 🎉",
+    list: Array.from({ length: 200 }, (_, i) => ({
+      id: `c${i}`,
+      name: "Ada Lovelace",
+      type: "PER",
+      score: 0.98765,
+    })),
+  };
+  const rtEncoded = encodeCompressedJson(rtPayload);
+  assert(
+    rtEncoded.startsWith("gz1:") &&
+      rtEncoded.length < JSON.stringify(rtPayload).length / 2 &&
+      JSON.stringify(decodeStoredJson(rtEncoded)) ===
+        JSON.stringify(rtPayload),
+    "compressedJson round-trips unicode and shrinks repetitive JSON 2x+"
+  );
+  assert(
+    JSON.stringify(decodeStoredJson(JSON.stringify({ a: 1 }))) ===
+      '{"a":1}' &&
+      decodeStoredJson(null) === null &&
+      decodeStoredJson("not json{{{") === null &&
+      decodeStoredJson("gz1:!!!invalid!!!") === null,
+    "decodeStoredJson reads legacy raw JSON and fails soft on garbage"
+  );
+  // Peak-accounting quota: the old value still counts during the check,
+  // so a shrinking replacement throws unless the old value goes first.
+  const quotaStore = new Map<string, string>();
+  const QUOTA_CAP = 5000;
+  const quotaTotal = () =>
+    [...quotaStore.values()].reduce((n, v) => n + v.length, 0);
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: (k: string) => (quotaStore.has(k) ? quotaStore.get(k)! : null),
+    setItem: (k: string, v: string) => {
+      const s = String(v);
+      if (quotaTotal() + s.length > QUOTA_CAP) {
+        throw { name: "QuotaExceededError" };
+      }
+      quotaStore.set(k, s);
+    },
+    removeItem: (k: string) => {
+      quotaStore.delete(k);
+    },
+  };
+  try {
+    quotaStore.set("other", "x".repeat(4000));
+    quotaStore.set("big", "y".repeat(3000));
+    assert(
+      setStoredItem("big", "z".repeat(900)) === true &&
+        quotaStore.get("big") === "z".repeat(900) &&
+        quotaTotal() === 4900,
+      "setStoredItem clears a larger value to fit a shrinking write at quota"
+    );
+    assert(
+      setStoredItem("fresh", "w".repeat(200)) === false &&
+        !quotaStore.has("fresh"),
+      "setStoredItem fails clean on fresh keys over quota"
+    );
+  } finally {
+    delete (globalThis as Record<string, unknown>).localStorage;
+  }
+  let removed = false;
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: () => "old-big-value",
+    setItem: () => {
+      throw new TypeError("denied");
+    },
+    removeItem: () => {
+      removed = true;
+    },
+  };
+  try {
+    assert(
+      setStoredItem("k", "small") === false && removed === false,
+      "setStoredItem never deletes on non-quota errors"
+    );
+  } finally {
+    delete (globalThis as Record<string, unknown>).localStorage;
+  }
+  // Legacy Firefox quota shape retries like the modern one and a success
+  // clears the recorded error.
+  const ffQuotaStore = new Map<string, string>();
+  const ffQuotaTotal = () =>
+    [...ffQuotaStore.values()].reduce((n, v) => n + v.length, 0);
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: (k: string) => (ffQuotaStore.has(k) ? ffQuotaStore.get(k)! : null),
+    setItem: (k: string, v: string) => {
+      if (ffQuotaTotal() + String(v).length > 1000) {
+        throw { name: "NS_ERROR_DOM_QUOTA_REACHED", code: 1014 };
+      }
+      ffQuotaStore.set(k, String(v));
+    },
+    removeItem: (k: string) => {
+      ffQuotaStore.delete(k);
+    },
+  };
+  try {
+    ffQuotaStore.set("other", "x".repeat(800));
+    ffQuotaStore.set("big", "y".repeat(500));
+    assert(
+      setStoredItem("big", "z".repeat(100)) === true &&
+        lastPersistError() === null,
+      "legacy quota errors retry and successes clear the recorded error"
+    );
+    assert(
+      setStoredItem("fresh", "w".repeat(500)) === false &&
+        lastPersistError()?.key === "fresh" &&
+        lastPersistError()?.name === "NS_ERROR_DOM_QUOTA_REACHED",
+      "failed persists record the key and error name"
+    );
+  } finally {
+    delete (globalThis as Record<string, unknown>).localStorage;
+  }
+  // Outcome subscription: UI re-reads the recorded error after every save,
+  // including saves from effects with no state change after them.
+  let notes = 0;
+  const unsubOutcome = subscribePersistOutcome(() => {
+    notes++;
+  });
+  const outcomeBase = getPersistOutcomeVersion();
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  try {
+    assert(
+      setStoredItem("s", "v") === true &&
+        notes === 1 &&
+        getPersistOutcomeVersion() === outcomeBase + 1,
+      "successful persists notify outcome subscribers"
+    );
+  } finally {
+    delete (globalThis as Record<string, unknown>).localStorage;
+  }
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: () => null,
+    setItem: () => {
+      throw { name: "QuotaExceededError" };
+    },
+    removeItem: () => {},
+  };
+  try {
+    assert(
+      setStoredItem("s", "v") === false &&
+        notes === 2 &&
+        getPersistOutcomeVersion() === outcomeBase + 2,
+      "failed persists notify outcome subscribers too"
+    );
+  } finally {
+    delete (globalThis as Record<string, unknown>).localStorage;
+  }
+  unsubOutcome();
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  try {
+    setStoredItem("s", "v");
+    assert(
+      notes === 2 && getPersistOutcomeVersion() === outcomeBase + 3,
+      "unsubscribed listeners stop firing but the version keeps moving"
+    );
+  } finally {
+    delete (globalThis as Record<string, unknown>).localStorage;
+  }
+  const legacyStore = new Map<string, string>();
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: (k: string) => (legacyStore.has(k) ? legacyStore.get(k)! : null),
+    setItem: (k: string, v: string) => {
+      legacyStore.set(k, String(v));
+    },
+    removeItem: (k: string) => {
+      legacyStore.delete(k);
+    },
+  };
+  try {
+    // Pre-compression raw value, as already sitting in user browsers.
+    legacyStore.set(
+      "sb_entities_uu",
+      JSON.stringify({ c1: [{ name: "Ada", type: "PER" }] })
+    );
+    assert(
+      loadChatEntities("uu").c1?.[0]?.name === "Ada",
+      "entity store reads pre-compression values"
+    );
+    saveChatEntities("uu", { c2: [{ name: "Bob", type: "PER" }] });
+    assert(
+      (legacyStore.get("sb_entities_uu") ?? "").startsWith("gz1:") &&
+        loadChatEntities("uu").c2?.[0]?.name === "Bob",
+      "entity store writes compressed and reads it back"
+    );
+    assert(
+      entityStorageInfo("uu").format === "gz" &&
+        entityStorageInfo("nobody").format === "missing",
+      "entityStorageInfo reports stored format"
+    );
+    legacyStore.set("sb_entities_raw", JSON.stringify({ c1: [] }));
+    assert(
+      entityStorageInfo("raw").format === "raw",
+      "entityStorageInfo flags pre-compression values"
+    );
+    // Empty verdicts are processed verdicts: NER ran and found nothing.
+    // Dropping them at load resurrects the chat on every refresh.
+    assert(
+      "c1" in loadChatEntities("raw") &&
+        loadChatEntities("raw").c1.length === 0,
+      "entity store keeps stored empty verdicts at load"
+    );
+    saveChatEntities("uu", { c3: [] });
+    assert(
+      "c3" in loadChatEntities("uu"),
+      "entity store round-trips empty verdicts through compression"
+    );
+  } finally {
+    delete (globalThis as Record<string, unknown>).localStorage;
+  }
+  // thread-b is current, thread-a needs scoring, the keyless chat belongs
+  // to no thread: newest thread first.
+  const tbHash = entityTextHash(
+    buildThreadScoringText(
+      catThreadSums.find((t) => t.key === "thread-b")!.chats
+    )
+  );
+  const threadQueueAll = buildThreadCategoryQueue(procItems, {});
+  const threadQueue = buildThreadCategoryQueue(procItems, {
+    "thread-b": threadRec({}, tbHash),
+  });
+  assert(
+    threadQueueAll.map((q) => q.id).join(",") === "thread-b,thread-a" &&
+      threadQueue.map((q) => q.id).join(",") === "thread-a",
+    "buildThreadCategoryQueue scores threads newest-first, skipping current and keyless"
+  );
+
+  const realFetch = (globalThis as Record<string, unknown>).fetch;
+  const classifyFlags: unknown[] = [];
+  (globalThis as Record<string, unknown>).fetch = async (
+    url: unknown,
+    init?: { body?: unknown }
+  ) => {
+    const body = JSON.parse(String((init?.body as string) ?? "{}")) as {
+      items?: Array<{ id: string }>;
+      multiLabel?: unknown;
+    };
+    const bodyItems = body.items ?? [];
+    if (String(url).includes("classify-batch")) {
+      classifyFlags.push(body.multiLabel);
+      return {
+        ok: true,
+        json: async () => ({
+          results: bodyItems.map((it) => ({
+            id: it.id,
+            scores: { finance: 0.9 },
+          })),
+        }),
+      };
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        results: bodyItems.map((it) => ({
+          id: it.id,
+          entities: [{ text: "X", label: "PER", score: 1 }],
+        })),
+      }),
+    };
+  };
   const memStore2 = new Map<string, string>();
   (globalThis as Record<string, unknown>).localStorage = {
     getItem: (k: string) => (memStore2.has(k) ? memStore2.get(k)! : null),
@@ -1907,15 +2551,20 @@ async function runTests() {
   };
   try {
     const batchSizes: number[] = [];
+    let lastCats: ThreadCategoryMap = {};
     const runnerArgs = {
       uuid: "u-run",
       items: procItems,
       baseMap: {},
       baseHashes: {},
+      baseThreadCategories: {},
       serverVersion: 8,
       microBatch: 2,
       onBatch: (merged: ChatEntityMap) => {
         batchSizes.push(Object.keys(merged).length);
+      },
+      onCategories: (merged: ThreadCategoryMap) => {
+        lastCats = merged;
       },
     };
     const first = processRunner.start(runnerArgs);
@@ -1931,11 +2580,119 @@ async function runTests() {
     assert(
       snap.status === "idle" &&
         snap.error === null &&
-        snap.done === 4 &&
-        snap.total === 4 &&
-        batchSizes.length === 2,
-      "processRunner drains the queue in micro-batches and reports completion"
+        snap.phase === "categories" &&
+        snap.done === 6 &&
+        snap.total === 6 &&
+        batchSizes.length === 2 &&
+        Object.keys(lastCats).join(",") === "thread-b,thread-a" &&
+        topCategory(lastCats["thread-a"].scores) === "finance" &&
+        classifyFlags.length === 1 &&
+        classifyFlags.every((f) => f === false),
+      "processRunner drains NER then thread verdicts in micro-batches and reports completion"
     );
+    // The runner persists BOTH entity stores itself (never via UI echo):
+    // hashes landing while the map doesn't is exactly the refresh-reset.
+    const storedMap = decodeStoredJson(
+      memStore2.get("sb_entities_u-run") ?? null
+    ) as Record<string, unknown> | null;
+    const storedHashes = decodeStoredJson(
+      memStore2.get("sb_entityhash_u-run") ?? null
+    ) as Record<string, unknown> | null;
+    assert(
+      !!storedMap &&
+        !!storedHashes &&
+        Object.keys(storedMap).length === procItems.length &&
+        Object.keys(storedHashes).length === procItems.length,
+      "processRunner persists the entity map and hashes itself every NER run"
+    );
+    // Second run: every chat is NER-current, so NER is skipped and only
+    // the 2 thread verdicts run.
+    const fullMap: ChatEntityMap = {};
+    const fullHashes: Record<string, { hash: string; version: number }> = {};
+    for (const it of procItems) {
+      fullMap[it.id] = [{ name: "x", type: "PER", score: 1 }];
+      fullHashes[it.id] = {
+        hash: entityTextHash(buildEntryClassificationText(it, [])),
+        version: 8,
+      };
+    }
+    let rescoreCats: ThreadCategoryMap = {};
+    processRunner.start({
+      ...runnerArgs,
+      baseMap: fullMap,
+      baseHashes: fullHashes,
+      onCategories: (merged: ThreadCategoryMap) => {
+        rescoreCats = merged;
+      },
+    });
+    for (let i = 0; i < 200 && processRunner.isRunning(); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const snap2 = processRunner.getSnapshot();
+    assert(
+      snap2.status === "idle" &&
+        snap2.error === null &&
+        snap2.phase === "categories" &&
+        snap2.done === 2 &&
+        snap2.total === 2 &&
+        Object.keys(rescoreCats).join(",") === "thread-b,thread-a",
+      "processRunner skips NER for current chats and scores only thread verdicts"
+    );
+    // Full-loop regression for the stuck-NER-count bug: the server finds
+    // nothing for every chat (entities: []), the run stores those empty
+    // verdicts, and a simulated refresh (load both stores, rebuild the
+    // queue) must come back empty — not resurrect every chat.
+    const nerMock = (globalThis as Record<string, unknown>).fetch;
+    (globalThis as Record<string, unknown>).fetch = async (
+      url: unknown,
+      init?: { body?: unknown }
+    ) => {
+      const body = JSON.parse(String((init?.body as string) ?? "{}")) as {
+        items?: Array<{ id: string }>;
+      };
+      const bodyItems = body.items ?? [];
+      if (String(url).includes("classify-batch")) {
+        return {
+          ok: true,
+          json: async () => ({
+            results: bodyItems.map((it) => ({
+              id: it.id,
+              scores: { finance: 0.9 },
+            })),
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          results: bodyItems.map((it) => ({ id: it.id, entities: [] })),
+        }),
+      };
+    };
+    try {
+      processRunner.start({ ...runnerArgs, uuid: "u-empty" });
+      for (let i = 0; i < 200 && processRunner.isRunning(); i++) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      const reloadedMap = loadChatEntities("u-empty");
+      const reloadedHashes = loadChatEntityHashes("u-empty");
+      const refreshQueue = buildProcessQueue(
+        procItems,
+        reloadedMap,
+        reloadedHashes,
+        8
+      );
+      assert(
+        processRunner.getSnapshot().status === "idle" &&
+          procItems.every(
+            (it) => it.id in reloadedMap && reloadedMap[it.id].length === 0
+          ) &&
+          refreshQueue.length === 0,
+        "empty NER verdicts persist and never requeue after a refresh"
+      );
+    } finally {
+      (globalThis as Record<string, unknown>).fetch = nerMock;
+    }
   } finally {
     processRunner.stop();
     (globalThis as Record<string, unknown>).fetch = realFetch;

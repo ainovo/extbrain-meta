@@ -507,6 +507,7 @@ export const HistoriesView: React.FC<Props> = ({
             hasEntities={Object.keys(entityMap).length > 0}
             onViewChats={onSelectEntities}
             minScore={minScore}
+            noun="chats"
           />
         </div>
       )}

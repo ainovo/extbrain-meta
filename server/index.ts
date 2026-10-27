@@ -16,7 +16,15 @@ import {
   recoverSpanText,
   truncateAtWordBoundary,
 } from "../src/lib/entities";
-import { MAX_API_BODY_BYTES } from "../src/lib/retrievalEngine";
+import {
+  MAX_API_BODY_BYTES,
+  normalizeZeroShotBatch,
+} from "../src/lib/retrievalEngine";
+import {
+  extractionConcurrencyFor,
+  mapWithConcurrency,
+  retryDelayMs,
+} from "../src/lib/synthesize";
 
 dotenv.config();
 
@@ -78,26 +86,42 @@ async function callLLM(
       : {}),
   };
 
-  const resp = await fetch(`${META_API_BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
+  // The rate-limit docs ask clients to retry 429s with exponential
+  // backoff + jitter and to honor Retry-After.
+  const MAX_429_RETRIES = 3;
+  for (let attempt = 0; ; attempt++) {
+    const resp = await fetch(`${META_API_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
 
-  if (!resp.ok) {
+    if (resp.ok) {
+      const data = (await resp.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      return (data.choices?.[0]?.message?.content || "").trim();
+    }
+
     const errText = await resp.text();
-    throw new Error(
-      `Meta Model API Error (${resp.status}): ${errText.slice(0, 400)}`
+    if (resp.status !== 429 || attempt >= MAX_429_RETRIES) {
+      throw new Error(
+        `Meta Model API Error (${resp.status}): ${errText.slice(0, 400)}`
+      );
+    }
+    const retryAfterSec = Number(resp.headers.get("retry-after"));
+    const waitMs = retryDelayMs(
+      attempt,
+      Number.isFinite(retryAfterSec) ? retryAfterSec : null
     );
+    console.log(
+      `[meta] rate limited (429) on ${model}, retrying in ${(waitMs / 1000).toFixed(1)}s (attempt ${attempt + 2}/${MAX_429_RETRIES + 1})`
+    );
+    await new Promise((r) => setTimeout(r, waitMs));
   }
-
-  const data = (await resp.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  return (data.choices?.[0]?.message?.content || "").trim();
 }
 
 let serverZeroShotClassifier: any = null;
@@ -370,25 +394,27 @@ app.post("/api/classify-entry", async (req, res) => {
 
 app.post("/api/classify-batch", async (req, res) => {
   try {
-    const { items, labels } = req.body as {
+    const { items, labels, multiLabel } = req.body as {
       items: Array<{ id: string; text: string }>;
       labels: string[];
+      multiLabel?: boolean;
     };
     const cleanLabels = (labels || []).map((l) => l.trim()).filter(Boolean);
     if (!items || items.length === 0 || cleanLabels.length === 0) {
       res.json({ results: [] });
       return;
     }
+    // Tags score target/contrast labels independently (multi-label); the
+    // category taxonomy picks exactly one label (softmaxed single-label).
+    const multi = multiLabel !== false;
 
     const clf = await getServerZeroShotClassifier();
-    const results: Array<{ id: string; scores: Record<string, number> }> = [];
-
-    for (const entry of items) {
-      // Pass all target and contrast labels in a single batch array with multi_label=true
-      const out: any = await clf(entry.text, cleanLabels, {
-        multi_label: true,
-        hypothesis_template: "This text is about {}.",
-      });
+    const opts = {
+      multi_label: multi,
+      hypothesis_template: "This text is about {}.",
+    };
+    const scoreOne = async (text: string): Promise<Record<string, number>> => {
+      const out: any = await clf(text, cleanLabels, opts);
       const single = Array.isArray(out) ? out[0] : out;
       const scoreMap: Record<string, number> = {};
       if (
@@ -400,7 +426,33 @@ app.post("/api/classify-batch", async (req, res) => {
           scoreMap[single.labels[i]] = single.scores[i];
         }
       }
-      results.push({ id: entry.id, scores: scoreMap });
+      return scoreMap;
+    };
+
+    const results: Array<{ id: string; scores: Record<string, number> }> = [];
+    // One pipeline call for the whole micro-batch lets the model batch
+    // internally instead of paying per-chat overhead N times. If the
+    // output shape ever mismatches, fall back to one call per chat —
+    // slower, but scores can never misalign to the wrong chat.
+    const batched = normalizeZeroShotBatch(
+      await clf(
+        items.map((e) => e.text),
+        cleanLabels,
+        opts
+      ),
+      items.length
+    );
+    if (batched) {
+      for (let i = 0; i < items.length; i++) {
+        results.push({ id: items[i].id, scores: batched[i] });
+      }
+    } else {
+      console.log(
+        `[meta] zero-shot batch shape mismatch, falling back to sequential (${items.length} chats)`
+      );
+      for (const entry of items) {
+        results.push({ id: entry.id, scores: await scoreOne(entry.text) });
+      }
     }
 
     res.json({ results });
@@ -1088,18 +1140,29 @@ app.post("/api/synthesize-thread-stream", async (req, res) => {
     if (batches.length === 1) {
       finalUser = `PROJECT TOPIC: "${projectQuery}"\n\nCHRONOLOGICAL ASYMMETRICALLY-PACKED PROJECT CHATS (100% verbatim user prompts + condensed AI context):\n${batches[0]}\n\nGenerate the requested project summary in clean Obsidian Markdown.`;
     } else {
-      const intermediateExtractions: string[] = [];
-      for (let i = 0; i < batches.length; i++) {
-        send({ progress: `Extracting batch ${i + 1}/${batches.length}…` });
-        const partial = await callLLM(
-          modelConfig,
-          `You are extracting factual chronological project notes from Batch ${i + 1} of ${batches.length} for the project "${projectQuery}". Preserve all exact timestamps, user-shared metrics, campaign names, errors, config snippets, and decisions verbatim.`,
-          `Extract all chronological events, user prompts, metrics, and outcomes from Batch ${i + 1}:\n\n${batches[i]}`
-        );
-        intermediateExtractions.push(
+      // Batches are independent: extract them concurrently instead of
+      // sequentially, so a 3-batch run takes ~1 extraction instead of ~3.
+      // Fan-out follows the model's rate-limit tier so a huge selection
+      // can't burst past the per-team TPM budget; results keep order and
+      // join chronologically.
+      const fanOut = extractionConcurrencyFor(modelConfig?.model ?? "");
+      const capped =
+        batches.length > fanOut ? ` (up to ${fanOut} at a time)` : "";
+      send({ progress: `Extracting ${batches.length} batches in parallel${capped}…` });
+      const partials = await mapWithConcurrency(
+        batches,
+        fanOut,
+        (batch, i) =>
+          callLLM(
+            modelConfig,
+            `You are extracting factual chronological project notes from Batch ${i + 1} of ${batches.length} for the project "${projectQuery}". Preserve all exact timestamps, user-shared metrics, campaign names, errors, config snippets, and decisions verbatim.`,
+            `Extract all chronological events, user prompts, metrics, and outcomes from Batch ${i + 1}:\n\n${batch}`
+          )
+      );
+      const intermediateExtractions = partials.map(
+        (partial, i) =>
           `### Extracted Chronological Notes (Batch ${i + 1}/${batches.length})\n${partial}`
-        );
-      }
+      );
       finalUser = `PROJECT TOPIC: "${projectQuery}"\n\nBelow are the chronological milestone extractions across ${batches.length} batches of chat history.\nSynthesize them into a single unified project summary following the system instructions:\n\n${intermediateExtractions.join("\n\n---\n\n")}`;
     }
 
