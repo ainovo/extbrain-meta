@@ -12,6 +12,7 @@ import {
 import {
   NerRawToken,
   groupNerWords,
+  hasNameLetters,
   nerWordRuns,
   projectTextAlnum,
   recoverSpanText,
@@ -278,7 +279,8 @@ app.post("/api/extract-entities-batch", async (req, res) => {
         // the same text for the markerless fallback).
         for (const g of groupNerWords(nerWordRuns(surfaces, tokens, text))) {
           const name = recoverSpanText(text, proj, surfaces, g.lo, g.hi);
-          if (!name) continue;
+          // Letter-less spans ("298-7775") are mistags, never names.
+          if (!name || !hasNameLetters(name)) continue;
           entities.push({ text: name, label: g.type, score: g.score });
         }
       }

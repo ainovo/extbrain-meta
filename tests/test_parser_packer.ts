@@ -41,7 +41,7 @@ import {
 } from "../src/lib/urlPreview";
 import { summarizeThreads } from "../src/lib/threads";
 import { inDateRange, taggedChatIds, type TagDef } from "../src/lib/tags";
-import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
+import { aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
 import {
   buildEntryClassificationText,
   classifySingleTextWithModernBert,
@@ -430,6 +430,15 @@ async function runTests() {
     cleanEntityText("San Fran ##cisco") === "San Francisco" &&
       cleanEntityText("My ##ho ##ros") === "Myhoros",
     "cleanEntityText strips WordPiece ## continuation markers"
+  );
+  assert(
+    !hasNameLetters("298-7775") &&
+      !hasNameLetters("...") &&
+      !hasNameLetters("") &&
+      hasNameLetters("50 Cent") &&
+      hasNameLetters("U2") &&
+      hasNameLetters("O'Brien"),
+    "hasNameLetters keeps names with letters, drops letter-less mistags"
   );
   const subwordMap: ChatEntityMap = {
     c1: [{ name: "San Fran ##cisco", type: "LOC" }],
@@ -2555,6 +2564,17 @@ async function runTests() {
     assert(
       "c3" in loadChatEntities("uu"),
       "entity store round-trips empty verdicts through compression"
+    );
+    saveChatEntities("uu", {
+      noisy: [{ name: "298-7775", type: "PER" }],
+      fine: [{ name: "50 Cent", type: "PER" }],
+    });
+    const noiseLoaded = loadChatEntities("uu");
+    assert(
+      "noisy" in noiseLoaded &&
+        noiseLoaded.noisy.length === 0 &&
+        noiseLoaded.fine.length === 1,
+      "entity store drops letter-less mistags at load, keeps real names"
     );
   } finally {
     delete (globalThis as Record<string, unknown>).localStorage;

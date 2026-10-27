@@ -45,7 +45,7 @@ export function loadChatEntities(uuid: string): ChatEntityMap {
           type: e?.type || "MISC",
           ...(typeof e?.score === "number" ? { score: e.score } : {}),
         }))
-        .filter((e) => e.name.length >= 2);
+        .filter((e) => e.name.length >= 2 && hasNameLetters(e.name));
       cleaned[chatId] = fixed;
     }
     return cleaned;
@@ -93,6 +93,16 @@ export function cleanEntityText(name: string): string {
 
 export function normalizeEntityKey(name: string): string {
   return cleanEntityText(name).toLowerCase();
+}
+
+/**
+ * Names need letters: CoNLL annotates no numeric entity type, so a span
+ * with no letters at all ("298-7775") from this head is always a mistag,
+ * whatever its type or score. Legit names ("50 Cent", "U2", "O'Brien")
+ * all keep at least one letter.
+ */
+export function hasNameLetters(name: string): boolean {
+  return /[\p{L}]/u.test(name || "");
 }
 
 /**
