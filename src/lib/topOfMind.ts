@@ -84,7 +84,9 @@ export function filterChatsByEntities(
   entityMap: ChatEntityMap,
   keys: string[]
 ): ParsedActivityItem[] {
-  const wanted = new Set(keys);
+  // Canonical on both sides: pill keys, typed text, and stored variants
+  // ("Asif's") all meet as one key.
+  const wanted = new Set(keys.map(normalizeEntityKey));
   return items.filter((it) => chatMentionsAny(entityMap, it.id, wanted));
 }
 
@@ -99,7 +101,7 @@ export function filterItemsByEntities(
   entityMap: ChatEntityMap,
   keys: string[]
 ): ParsedActivityItem[] {
-  const wanted = new Set(keys);
+  const wanted = new Set(keys.map(normalizeEntityKey));
   const hitThreads = new Set<string>();
   for (const it of items) {
     if (!chatMentionsAny(entityMap, it.id, wanted)) continue;

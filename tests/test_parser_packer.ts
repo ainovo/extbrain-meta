@@ -467,6 +467,34 @@ async function runTests() {
     "isCommonConnective catches standalone connectives, spares real names"
   );
   assert(
+    normalizeEntityKey("Asif") === "asif" &&
+      normalizeEntityKey("Asif's") === "asif" &&
+      normalizeEntityKey("Asif\u2019s") === "asif" &&
+      normalizeEntityKey("Mr. Asif") === "asif" &&
+      normalizeEntityKey("Dr Smith") === "smith" &&
+      normalizeEntityKey("Mrs. Smith") === "smith" &&
+      normalizeEntityKey("St. Louis") === "st. louis" &&
+      normalizeEntityKey("Chris'") === "chris" &&
+      normalizeEntityKey("McDonald's") === "mcdonald" &&
+      normalizeEntityKey("D'Amaro") === "d'amaro" &&
+      normalizeEntityKey("Smith Jr") === "smith jr" &&
+      normalizeEntityKey("Jean\u2010Baptiste") === "jean-baptiste",
+    "normalizeEntityKey canonicalizes possessives, titles, unicode marks"
+  );
+  const asifMap: ChatEntityMap = {
+    c1: [{ name: "Asif", type: "PER" }],
+    c2: [{ name: "Asif's", type: "PER" }],
+    c3: [{ name: "Asif\u2019s", type: "PER" }],
+    c4: [{ name: "Mr. Asif", type: "PER" }],
+  };
+  const asifAgg = aggregateEntities(asifMap, 0);
+  assert(
+    asifAgg.length === 1 &&
+      asifAgg[0].key === "asif" &&
+      asifAgg[0].chatCount === 4,
+    "surface variants aggregate to one person with all four chats"
+  );
+  assert(
     stripMarkdownForNer("[Bob](http://x) and `code`") === "Bob and code" &&
       stripMarkdownForNer("```js\nvar x = 1;\n```") === "" &&
       stripMarkdownForNer("# Title\n\nBody **bold** end") ===
@@ -1461,6 +1489,17 @@ async function runTests() {
       chatLevel.some((it) => it.id === "e1") &&
       chatLevel.some((it) => it.id === "e4"),
     "filterChatsByEntities keeps only chats that mention the entity"
+  );
+  // Both sides canonical: typed "Asif" finds stored "Asif's", any case.
+  const possMap: ChatEntityMap = { e1: [{ name: "Asif's", type: "PER" }] };
+  assert(
+    filterChatsByEntities(expItems, possMap, ["Asif"]).some(
+      (it) => it.id === "e1"
+    ) &&
+      filterChatsByEntities(expItems, possMap, ["ASIF"]).some(
+        (it) => it.id === "e1"
+      ),
+    "entity search matches possessive and case variants"
   );
   // Tiny token budget forces one batch per chat; the production budget
   // packs the same chats into a single small batch.

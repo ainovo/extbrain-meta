@@ -110,8 +110,25 @@ export function cleanEntityText(name: string): string {
     .trim();
 }
 
+/**
+ * Canonical mention key: the single dedup point for pills, counts, and
+ * search, so surface variants merge ("Asif", "Asif's", "Asif’s", "Mr. Asif"
+ * are one person). Folds case, unicode punctuation (curly apostrophes and
+ * dashes), honorific prefixes, and possessive suffixes. Display keeps raw
+ * forms (most frequent wins); suffixes (Jr, III) are kept because they
+ * disambiguate distinct people, unlike prefixes.
+ */
 export function normalizeEntityKey(name: string): string {
-  return cleanEntityText(name).toLowerCase();
+  let key = cleanEntityText(name).toLowerCase();
+  // Curly/single-quote variants (U+2018 left, U+2019 right, U+201A low,
+  // U+201B reversed) and dash variants (U+2010-2015, U+2212 minus) first,
+  // so possessive detection below sees plain ASCII.
+  key = key
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u2010-\u2015\u2212]/g, "-");
+  key = key.replace(/^(mr|mrs|ms|dr|prof)\.?\s+/, "");
+  key = key.replace(/'s$/, "").replace(/'+$/, "");
+  return key;
 }
 
 /**
