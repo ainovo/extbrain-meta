@@ -4,7 +4,7 @@
 
 > Proudly built 100% by Meta Muse Code for the [Meta Global AI Developer Hackathon](https://cerebralvalley.ai/e/meta-ai-developer-hackathon).
 
-<img width="496" height="596" alt="image" src="https://github.com/user-attachments/assets/8f6370a0-0edb-4cc7-8498-d063ab4a7f53" />
+<img width="495" height="591" alt="image" src="https://github.com/user-attachments/assets/f435535f-eed7-48b7-8696-64aff905191a" />
 
 ## The Problem
 
