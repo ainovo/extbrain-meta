@@ -16,6 +16,7 @@ import {
   groupNerWords,
   hasNameLetters,
   isCommonConnective,
+  isPlausibleEntityName,
   nerWordRuns,
   projectTextAlnum,
   recoverSpanText,
@@ -140,7 +141,7 @@ async function getServerZeroShotClassifier() {
       env.allowLocalModels = false;
       serverZeroShotClassifier = await pipeline(
         "zero-shot-classification",
-        "MoritzLaurer/ModernBERT-large-zeroshot-v2.0",
+        "onnx-community/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7-ONNX",
         { dtype: "q8" }
       );
       return serverZeroShotClassifier;
@@ -169,23 +170,31 @@ let serverNerLoadingPromise: Promise<any> | null = null;
  * sentence boundaries (abbreviations excepted),
  * 13 = JSON blobs and UUIDs stripped before NER; names capped at 120 chars,
  * 14 = list separators split word runs (coordinations enumerate again);
- * tagged punctuation never votes on a word's type).
+ * tagged punctuation never votes on a word's type,
+ * 15 = query strings/templates stripped before NER; punctuation-only BPE
+ * fragments (list closers, "=", "{{") never glue words or bridge groups;
+ * spans containing assignments or fused list boundaries are rejected,
+ * 16 = Davlan XLM-RoBERTa-base NER (quantized ONNX, markerless word runs,
+ * BIO + DATE labels) replaces RoBERTa-large,
+ * 17 = comma places merge only on known region codes ("Berkeley, CA"
+ * stays whole; "Canada, UK" splits into two places)).
  * The Load page stores this per chat alongside its content hash and only
  * reprocesses chats whose record is missing, stale, or from an older version.
  */
-const NER_EXTRACTOR_VERSION = 14;
+const NER_EXTRACTOR_VERSION = 17;
 
 /**
- * Token-classification model for NER (extractor and tokenizer agree). The
- * author repo ships no tokenizer.json/onnx layout, so the weights live in
- * a prepared local dir (scripts/prepare_roberta_ner.py, one-time ~1.8GB);
- * resolved from this file so the server's working directory doesn't matter.
+ * Token-classification model for NER (extractor and tokenizer agree):
+ * Davlan/xlm-roberta-base-ner-hrl via the pre-exported ONNX port
+ * (tjruesch/xlm-roberta-base-ner-hrl-onnx), assembled once into a local
+ * dir (scripts/prepare_xlm_ner.py, one-time ~1.4GB); resolved from this
+ * file so the server's working directory doesn't matter.
  */
 const NER_MODEL_ID = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
   "models",
-  "roberta-large-ner-english"
+  "xlm-roberta-base-ner-hrl"
 );
 
 async function getServerNerExtractor() {
@@ -197,7 +206,7 @@ async function getServerNerExtractor() {
         !fs.existsSync(path.join(NER_MODEL_ID, "onnx", "model.onnx"))
       ) {
         throw new Error(
-          `RoBERTa NER weights missing at ${NER_MODEL_ID} — run: npm run prepare:ner`
+          `XLM-R NER weights missing at ${NER_MODEL_ID} — run: npm run prepare:ner`
         );
       }
       const { pipeline, env, AutoTokenizer } = await import(
@@ -211,7 +220,7 @@ async function getServerNerExtractor() {
           { dtype: "q8" }
         );
       } catch (err) {
-        // Quantized load failed (e.g. quantization was skipped): fall back
+        // Quantized load failed (e.g. only FP32 was fetched): fall back
         // to full precision rather than failing all NER.
         console.warn(
           `[ner] quantized load failed for ${NER_MODEL_ID}, retrying full precision:`,
@@ -299,6 +308,7 @@ app.post("/api/extract-entities-batch", async (req, res) => {
             !name ||
             name.length > MAX_ENTITY_NAME_CHARS ||
             !hasNameLetters(name) ||
+            !isPlausibleEntityName(name) ||
             isCommonConnective(name)
           ) {
             continue;
@@ -330,7 +340,7 @@ app.post("/api/generate-nli-labels", async (req, res) => {
 
     const today = new Date().toISOString().slice(0, 10);
 
-    const systemPrompt = `You generate NLI zero-shot evaluation labels for ModernBERT-large-zeroshot-v2.0.
+    const systemPrompt = `You generate NLI zero-shot evaluation labels for mDeBERTa-v3-base-xnli (multilingual NLI).
 CRITICAL NLI RULE: If the user names a specific project, brand, or domain, the FIRST target_label MUST include that exact name (e.g. "user acquisition optimization for myhoros.com"), because chats explicitly about the project should match strongly. ALSO include 1-2 broader functional/topic phrases WITHOUT the brand/domain name, so follow-up turns that omit the name still match (scoring takes the best match across all labels).
 Return strict JSON only with "tag_name", "target_labels", "contrast_labels", "date_start", and "date_end".`;
 

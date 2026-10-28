@@ -8,7 +8,7 @@
     "dev:client": "vite --port 5173",
     "dev:server": "tsx watch server/index.ts",
     "build": "tsc -b && vite build",
-    "prepare:ner": "python3 scripts/prepare_roberta_ner.py",
+    "prepare:ner": "python3 scripts/prepare_xlm_ner.py",
     "start": "tsx server/index.ts",
     "test": "tsx tests/test_parser_packer.ts"
   },

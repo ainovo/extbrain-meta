@@ -108,6 +108,31 @@ export const META_MODEL_OPTIONS: Array<{
 
 export const DEFAULT_META_MODEL = "muse-spark-1.3";
 
+/** Default for tag/summary generation: discounted, content may train Meta models. */
+export const DEFAULT_CONTRIBUTOR_MODEL = "muse-spark-1.3-contributor";
+
+/** NER backend: on-device XLM-R, or a Modal-hosted GLiNER (not wired yet). */
+export type NerBackendId = "local" | "modal-gliner";
+
+export const NER_BACKEND_OPTIONS: Array<{ id: NerBackendId; label: string }> = [
+  {
+    id: "local",
+    label: "local - xlm-roberta-base-ner-hrl - based on FacebookAI/xlm-roberta-base",
+  },
+  { id: "modal-gliner", label: "modal - gliner_medium-v2.1" },
+];
+
+/** NLI backend: on-device mDeBERTa XNLI, or a Modal-hosted model (TBD). */
+export type NliBackendId = "local" | "modal-tbd";
+
+export const NLI_BACKEND_OPTIONS: Array<{ id: NliBackendId; label: string }> = [
+  {
+    id: "local",
+    label: "local - mdeberta-v3-base-xnli-multilingual-nli - based on microsoft/mdeberta-v3-base",
+  },
+  { id: "modal-tbd", label: "modal - TBD" },
+];
+
 /**
  * Default packed-tokens-per-synthesis-batch. All picker models offer a
  * ~1M-token window, so histories pack into a single batch unless they are
@@ -126,14 +151,23 @@ export function isMetaModelId(v: unknown): v is string {
 }
 
 export interface DualModelConfig {
+  /** Legacy toggle (Models section removed): always treated as independent. */
   useSameModel: boolean;
+  /** Tag generation model (NLI label authoring for auto-tagging). */
   discovery: ModelEndpointConfig;
+  /** Summary generation model (final project summary). */
   synthesis: ModelEndpointConfig;
   maxTokensPerSynthesisBatch: number;
   /** Auto-tag rule: keep chat when max_target_score >= threshold AND > max_contrast_score. */
   zeroShotThreshold?: number;
   /** NER mention floor: ignore extracted spans scoring below this (0 = off). */
   nerScoreFloor?: number;
+  /** NER backend selection (local default; modal options not wired yet). */
+  nerBackend?: NerBackendId;
+  /** NLI backend selection (local default; modal options not wired yet). */
+  nliBackend?: NliBackendId;
+  /** Mention surfacing rule: count entities mentioned in N+ chats (default 4). */
+  mentionMinChats?: number;
 }
 
 export interface PromptTemplate {

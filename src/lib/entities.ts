@@ -50,6 +50,7 @@ export function loadChatEntities(uuid: string): ChatEntityMap {
             e.name.length >= 2 &&
             e.name.length <= MAX_ENTITY_NAME_CHARS &&
             hasNameLetters(e.name) &&
+            isPlausibleEntityName(e.name) &&
             !isCommonConnective(e.name)
         );
       cleaned[chatId] = fixed;
@@ -100,7 +101,7 @@ export function saveChatEntities(uuid: string, map: ChatEntityMap): boolean {
 export function cleanEntityText(name: string): string {
   // The \(...\) groups tolerate one nesting level of parens for URLs like
   // /wiki/X_(disambiguation).
-  return name
+  let out = name
     .replace(/!\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, "$1")
     .replace(/\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, "$1")
     .replace(/\]\((?:[^()]|\([^()]*\))*\)/g, "")
@@ -109,6 +110,55 @@ export function cleanEntityText(name: string): string {
     .replace(/\s*##/g, "")
     .replace(/\s+/g, " ")
     .trim();
+  // Drop stray edge punctuation left by list/bracket boundaries in the
+  // source ("Ripper)," -> "Ripper"), but keep balanced pairs ("(CA)").
+  const pairs: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+  const count = (s: string, ch: string) => s.split(ch).length - 1;
+  for (;;) {
+    const before = out;
+    out = out.replace(/^["'“”‘’]+/, "").replace(/["'“”‘’]+$/, "");
+    if (/[,;:]$/.test(out)) out = out.slice(0, -1);
+    const last = out[out.length - 1] ?? "";
+    if (
+      (last === ")" || last === "]" || last === "}") &&
+      count(out, last) >
+        count(out, Object.keys(pairs).find((k) => pairs[k] === last) ?? "")
+    ) {
+      out = out.slice(0, -1);
+    }
+    const first = out[0] ?? "";
+    if (
+      first in pairs &&
+      count(out, first) > count(out, pairs[first])
+    ) {
+      out = out.slice(1);
+    }
+    out = out.trim();
+    if (out === before) break;
+  }
+  return out;
+}
+
+/**
+ * True when a recovered span can plausibly be a name at all. URL query
+ * strings ("channel=reddit&campaign_id={{CAMPAIGN_ID}}"), template
+ * placeholders, assignments, and spans fused across a closing-bracket
+ * list boundary ("Ripper), Gambit") can never be names, whatever the
+ * model tagged — reject them instead of cleaning them into a mess.
+ * Legit punctuation inside names ("Berkeley, CA", "MYHOROS.COM",
+ * "AT&T", "San Francisco (CA)") passes.
+ */
+export function isPlausibleEntityName(name: string): boolean {
+  const n = (name || "").trim();
+  if (!n) return false;
+  if (/[={}]/.test(n)) return false;
+  if (/[`<>\\^~|]/.test(n)) return false;
+  if (n.includes("://") || n.includes("?")) return false;
+  // A closing bracket (or semicolon) followed by a list separator means
+  // the span crossed from one list item into the next.
+  if (/[)\]};]\s*[,;]\s*\S/.test(n)) return false;
+  if (/[,;]\s*[)\]}]/.test(n)) return false;
+  return true;
 }
 
 /**
@@ -277,6 +327,15 @@ export function stripMarkdownForNer(text: string): string {
   s = s.replace(/^\s*\[[^\]]+\]:\s*\S+.*$/gm, "");
   s = s.replace(/https?:\/\/\S+/g, "");
   s = s.replace(/<\/?[a-zA-Z][^<>]*>/g, "");
+  // URL query strings, template placeholders, and key=value params are
+  // data, not prose: "channel=reddit&campaign_id={{CAMPAIGN_ID}}" is one
+  // spaceless token the model otherwise tags and fuses into a fake name.
+  // Links above have already collapsed to their text, so dropping every
+  // whitespace-delimited token containing "=" only loses assignments.
+  s = s.replace(/\{\{[\s\S]*?\}\}/g, " ");
+  s = s.replace(/\$\{[^}\n]*\}/g, " ");
+  s = s.replace(/\bwww\.\S+/g, " ");
+  s = s.replace(/\S+=\S*/g, " ");
   s = s.replace(/^#{1,6}\s+/gm, "");
   s = s.replace(/^>\s?/gm, "");
   s = s.replace(/^\s*([-*+]\s+|\d+[.)]\s+)/gm, "");
@@ -406,17 +465,84 @@ function isJunk(key: string): boolean {
  * Only entities appearing in MORE than minChats different chats are kept
  * (default minChats = 3, i.e. 4+ chats). Spans below minScore are dropped
  * (unscored legacy spans count as 0, so any floor above 0 hides them
- * until a re-extract records scores).
+ * until a re-extract records scores). A shorter key whose words are a
+ * trailing subsequence of a longer same-type key ("de botton" vs "alain
+ * de botton") folds into the longer one: surname-only mentions attribute
+ * to the best-known full name instead of becoming a second person. The
+ * longer key with the most chats wins; ties break by mention count, then
+ * key order, so the outcome is deterministic.
  */
+interface EntityAccumulator {
+  forms: Map<string, number>;
+  types: Map<string, number>;
+  chats: Set<string>;
+}
+
+/**
+ * Fold surname-only mentions into their full name: when key A (fewer
+ * words) is a trailing word-subsequence of key B (more words) and both
+ * share a dominant type, A's forms/types/chats merge into B. Parents
+ * always have more words, so following parent pointers terminates.
+ */
+function foldSuffixMentions(
+  acc: Map<string, EntityAccumulator>
+): Map<string, EntityAccumulator> {
+  const domType = (a: EntityAccumulator): string =>
+    [...a.types.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? "MISC";
+  const mentions = (a: EntityAccumulator): number =>
+    [...a.forms.values()].reduce((s, n) => s + n, 0);
+  const words = (k: string): string[] => k.split(/\s+/);
+  const parent = new Map<string, string>();
+  for (const key of acc.keys()) {
+    const wk = words(key);
+    let best: string | null = null;
+    for (const cand of acc.keys()) {
+      if (cand === key) continue;
+      const wc = words(cand);
+      if (wc.length <= wk.length) continue;
+      if (domType(acc.get(cand)!) !== domType(acc.get(key)!)) continue;
+      if (!wc.slice(-wk.length).every((w, i) => w === wk[i])) continue;
+      const bc = acc.get(cand)!;
+      const bb = best === null ? null : acc.get(best)!;
+      if (
+        bb === null ||
+        bc.chats.size > bb.chats.size ||
+        (bc.chats.size === bb.chats.size && mentions(bc) > mentions(bb)) ||
+        (bc.chats.size === bb.chats.size &&
+          mentions(bc) === mentions(bb) &&
+          cand < best!)
+      ) {
+        best = cand;
+      }
+    }
+    if (best !== null) parent.set(key, best);
+  }
+  const rootOf = (k: string): string => {
+    let r = k;
+    while (parent.has(r)) r = parent.get(r)!;
+    return r;
+  };
+  const merged = new Map<string, EntityAccumulator>();
+  for (const [key, a] of acc) {
+    const root = rootOf(key);
+    let m = merged.get(root);
+    if (!m) {
+      m = { forms: new Map(), types: new Map(), chats: new Set() };
+      merged.set(root, m);
+    }
+    for (const [f, n] of a.forms) m.forms.set(f, (m.forms.get(f) || 0) + n);
+    for (const [t, n] of a.types) m.types.set(t, (m.types.get(t) || 0) + n);
+    for (const c of a.chats) m.chats.add(c);
+  }
+  return merged;
+}
+
 export function aggregateEntities(
   map: ChatEntityMap,
   minChats = 3,
   minScore = 0
 ): EntityAggregate[] {
-  const acc = new Map<
-    string,
-    { forms: Map<string, number>; types: Map<string, number>; chats: Set<string> }
-  >();
+  const acc = new Map<string, EntityAccumulator>();
   for (const [chatId, ents] of Object.entries(map)) {
     const seen = new Set<string>();
     for (const e of ents || []) {
@@ -437,8 +563,9 @@ export function aggregateEntities(
       a.chats.add(chatId);
     }
   }
+  const merged = foldSuffixMentions(acc);
   const out: EntityAggregate[] = [];
-  for (const [key, a] of acc) {
+  for (const [key, a] of merged) {
     if (a.chats.size <= minChats) continue;
     const display =
       [...a.forms.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? key;
@@ -513,6 +640,10 @@ export interface NerEntityGroup {
   pendingGap: number;
   /** True when the pending gap contains a list separator (",", ";", ":"). */
   pendingComma: boolean;
+  /** Text of the pending glue word (which punctuation is bridging). */
+  pendingText: string;
+  /** True when whitespace stood before the pending glue word. */
+  pendingLeadSpace: boolean;
   /** True once any fused word holds a letter (gap-bridging needs this). */
   hasLetters: boolean;
   /** Lowercased text of the last fused word (abbreviation check). */
@@ -655,17 +786,25 @@ export function nerWordRuns(
       }
     } else if (roberta) {
       // Runs break before the next marked word-start (or a special token,
-      // which always ends the run); unmarked fragments glue onto the open
-      // word. List separators (, ;) never glue: "Braden, Max" must reach
-      // grouping as three words or coordinations fuse into one span.
-      while (
-        j + 1 < n &&
-        !SPECIAL_TOKENS.has(surfaces[j + 1] ?? "") &&
-        !startsWordMarked(surfaces[j + 1] ?? "") &&
-        !hasNewline(surfaces[j + 1] ?? "") &&
-        !LIST_SEPS.has(stripWordMarker(surfaces[j + 1] ?? ""))
-      ) {
-        j++;
+      // which always ends the run); unmarked letter fragments glue onto
+      // the open word. Separator punctuation never glues, in either
+      // direction: byte-level BPE emits tokens like "),", "=", and "{{",
+      // and gluing them fused list items ("Ripper), Gambit") and whole
+      // query strings ("channel=reddit&campaign_id=...") into one word.
+      // They become their own glue words for groupNerWords to judge.
+      // Plain "." / "'" still glue ("MYHOROS.COM", "folks."): they are
+      // intra-word marks, and their fragments never vote on type.
+      if (!isSeparatorPunctSurface(s)) {
+        while (
+          j + 1 < n &&
+          !SPECIAL_TOKENS.has(surfaces[j + 1] ?? "") &&
+          !startsWordMarked(surfaces[j + 1] ?? "") &&
+          !hasNewline(surfaces[j + 1] ?? "") &&
+          !isSeparatorPunctSurface(surfaces[j + 1] ?? "") &&
+          !LIST_SEPS.has(stripWordMarker(surfaces[j + 1] ?? ""))
+        ) {
+          j++;
+        }
       }
     } else if (!s.startsWith("##")) {
       while (
@@ -766,13 +905,31 @@ const ABBREV_TAILS = new Set([
 ]);
 
 /**
+ * Region codes that make "City, ST" a single place reference ("Berkeley,
+ * CA", "Toronto, ON"). US states + DC and Canadian provinces/territories.
+ * A bare length check used to qualify anything short ("Canada, UK" fused
+ * two countries); only a known sub-national code merges now.
+ */
+const REGION_CODES = new Set([
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA",
+  "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+  "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+  "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+  "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+  "ON", "QC", "BC", "AB", "MB", "SK", "NS", "NB", "NL", "PE",
+  "NT", "YT", "NU",
+]);
+
+/**
  * Group same-type tagged words across small punctuation gaps (the "." in
  * "MYHOROS.COM"). An untagged real word always splits the group ("Hi" in
  * "Braden Hi Braden", "and" in "Apple and Microsoft") — coordinations
  * enumerate distinct entities ("Max" / "Alex" / "Teo", "USPS" / "FedEx"),
  * so they must never fuse. The one exception is places, where "City, ST"
- * ("Sunnyvale, CA") is conventionally a single reference. A punctuation gap
- * bridges only off a lettered anchor ("298-7775" never anchors), and only
+ * ("Sunnyvale, CA") is conventionally a single reference — but only when
+ * the qualifier is a known region code, so country pairs ("Canada, UK")
+ * still split. A punctuation gap bridges only off a lettered anchor
+ * ("298-7775" never anchors), and only
  * when the join stays in-sentence: glued continuations ("MYHOROS.COM"),
  * comma places ("Sunnyvale, CA"), or abbreviation tails ("St. Louis").
  * A spaced join ("Archana. Because", "Archana? AI") is a sentence boundary
@@ -788,18 +945,25 @@ export function groupNerWords(
   let open: NerEntityGroup | null = null;
   for (const w of words) {
     if (!w.type) {
-      // Punctuation gaps are tolerated, except commas which only places
-      // span. A real word closes the group; its pending gap is discarded
+      // Only intra-name punctuation bridges a gap: "." in "MYHOROS.COM",
+      // "-" / "&" / "/" / "'" glued inside a name ("AT&T"). Commas and
+      // other list separators bridge only for places ("Sunnyvale, CA").
+      // Everything else — "=", "{{", ")", "),", "?", brackets — closes
+      // the group, so list items and query-string fragments never fuse.
+      // A real word also closes the group; its pending gap is discarded
       // (never absorbed into a span).
       const comma = LIST_SEPS.has(w.text);
+      const bridgeable = /^[.\-&/'’]+$/u.test(w.text);
       if (
         open &&
         w.glue &&
         open.pendingGap < maxWordGap &&
-        (!comma || open.type === "LOC")
+        (comma ? open.type === "LOC" : bridgeable)
       ) {
         open.pendingGap += 1;
         if (comma) open.pendingComma = true;
+        open.pendingText = w.text;
+        open.pendingLeadSpace = w.leadSpace;
       } else {
         open = null;
       }
@@ -809,13 +973,29 @@ export function groupNerWords(
     // plus an in-sentence bridge: a comma place ("Sunnyvale, CA"), a glued
     // continuation ("MYHOROS.COM"), or an abbreviation tail ("St. Louis").
     // A spaced join after .?! ("Archana. Because") is a sentence boundary.
+    // "&" bridges a name only when spaced ("Procter & Gamble") or glued
+    // between short fragments ("AT&T"); glued between full words it is a
+    // query-string separator ("reddit&campaign_id") and must split.
+    const spacedAmp =
+      !!open &&
+      open.pendingText === "&" &&
+      open.pendingLeadSpace &&
+      w.leadSpace;
+    const ampOk =
+      !open ||
+      !open.pendingText.includes("&") ||
+      spacedAmp ||
+      (open.tailText.length <= 3 && w.text.length <= 3);
     const gapOk =
       !open ||
       open.pendingGap === 0 ||
       (open.hasLetters &&
+        ampOk &&
         (open.pendingComma
-          ? open.type === "LOC" && w.text.length <= 3
-          : !w.leadSpace || ABBREV_TAILS.has(open.tailText)));
+          ? open.type === "LOC" && REGION_CODES.has(w.text.toUpperCase())
+          : spacedAmp ||
+            !w.leadSpace ||
+            ABBREV_TAILS.has(open.tailText)));
     if (
       open &&
       open.type === w.type &&
@@ -829,6 +1009,8 @@ export function groupNerWords(
       open.wordCount += 1;
       open.pendingGap = 0;
       open.pendingComma = false;
+      open.pendingText = "";
+      open.pendingLeadSpace = false;
       open.hasLetters = open.hasLetters || /[\p{L}]/u.test(w.text);
       open.tailText = w.text;
     } else {
@@ -840,6 +1022,8 @@ export function groupNerWords(
         wordCount: 1,
         pendingGap: 0,
         pendingComma: false,
+        pendingText: "",
+        pendingLeadSpace: false,
         hasLetters: /[\p{L}]/u.test(w.text),
         tailText: w.text,
       };
@@ -963,6 +1147,22 @@ function startsWordMarked(surface: string): boolean {
 
 function stripWordMarker(surface: string): string {
   return startsWordMarked(surface) ? surface.slice(1) : surface;
+}
+
+/**
+ * True when a surface is separator punctuation: no letters/digits, and
+ * not a plain intra-word mark ("." / apostrophes glue inside a word).
+ */
+function isSeparatorPunctSurface(surface: string): boolean {
+  const bare = stripWordMarker(
+    surface.startsWith("##") ? surface.slice(2) : surface
+  );
+  return (
+    bare.length > 0 &&
+    bare.trim().length > 0 &&
+    !/[\p{L}\p{N}]/u.test(bare) &&
+    !/^[.''’]+$/u.test(bare)
+  );
 }
 
 /** True when a surface carries a line break: words never span lines. */

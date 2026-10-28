@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { ChevronDown, Download } from "lucide-react";
 import {
+  DEFAULT_CONTRIBUTOR_MODEL,
   DEFAULT_MAX_TOKENS_PER_BATCH,
   DEFAULT_META_MODEL,
   DualModelConfig,
@@ -8,6 +9,10 @@ import {
   MAX_MODEL_CONTEXT_TOKENS,
   META_MODEL_OPTIONS,
   ModelEndpointConfig,
+  NER_BACKEND_OPTIONS,
+  NerBackendId,
+  NLI_BACKEND_OPTIONS,
+  NliBackendId,
 } from "../lib/types";
 import { exportFileName, exportUserDataZip } from "../lib/exportData";
 import {
@@ -22,11 +27,13 @@ function EndpointEditor({
   title,
   subtitle,
   endpoint,
+  defaultModel = DEFAULT_META_MODEL,
   onUpdate,
 }: {
   title: string;
   subtitle: string;
   endpoint: ModelEndpointConfig;
+  defaultModel?: string;
   onUpdate: (updated: ModelEndpointConfig) => void;
 }) {
   return (
@@ -40,7 +47,7 @@ function EndpointEditor({
         <label className="block text-xs text-mention mb-1">Meta model</label>
         <select
           value={
-            isMetaModelId(endpoint.model) ? endpoint.model : DEFAULT_META_MODEL
+            isMetaModelId(endpoint.model) ? endpoint.model : defaultModel
           }
           onChange={(e) =>
             onUpdate({ provider: "meta", model: e.target.value })
@@ -66,14 +73,12 @@ function EndpointEditor({
 function SettingsSection({
   id,
   title,
-  meta,
   collapsed,
   onToggle,
   children,
 }: {
   id: string;
   title: string;
-  meta?: string;
   collapsed: boolean;
   onToggle: (id: string) => void;
   children: React.ReactNode;
@@ -96,11 +101,6 @@ function SettingsSection({
         <h3 className="text-[11px] font-semibold uppercase tracking-wider text-mention/60">
           {title}
         </h3>
-        {meta && (
-          <span className="text-[11px] text-mention/60 font-mono truncate">
-            {meta}
-          </span>
-        )}
         <div className="flex-1 h-px bg-tag/70" />
       </div>
       {!collapsed && <div className="px-1 py-2">{children}</div>}
@@ -192,6 +192,47 @@ function EntityCloudPreview({
   );
 }
 
+/**
+ * Local-vs-Modal backend picker. Modal options are selectable so the
+ * preference persists, but no Modal endpoint is wired yet — picking one
+ * keeps the local model doing the work and says so below the picker.
+ */
+function BackendChoice<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: Array<{ id: T; label: string }>;
+  onChange: (v: T) => void;
+}) {
+  const modal = value !== "local";
+  return (
+    <div className="py-1">
+      <label className="block text-sm font-medium text-ink">{label}</label>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as T)}
+        className="mt-1 w-full rounded-lg bg-white border border-divider px-3 py-1.5 text-xs text-ink focus:outline-none focus:border-action"
+      >
+        {options.map((o) => (
+          <option key={o.id} value={o.id}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {modal && (
+        <p className="text-xs text-mention mt-1">
+          The Modal endpoint isn&apos;t wired up yet — the local model still
+          does the work.
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** Settings page: collapsible sections, details flat without boxes. */
 export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMap }) => {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -223,18 +264,6 @@ export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMa
     }
   };
 
-  const handleDiscoveryUpdate = (updated: ModelEndpointConfig) => {
-    if (config.useSameModel) {
-      onChange({ ...config, discovery: updated, synthesis: updated });
-    } else {
-      onChange({ ...config, discovery: updated });
-    }
-  };
-
-  const modelsMeta = config.useSameModel
-    ? config.discovery.model || "No model set"
-    : `${config.discovery.model || "?"} · ${config.synthesis.model || "?"}`;
-
   return (
     <div className="space-y-6">
       <div className="px-1">
@@ -250,117 +279,48 @@ export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMa
 
       <div className="space-y-8">
         <SettingsSection
-          id="models"
-          title="Models"
-          meta={modelsMeta}
-          collapsed={collapsed.has("models")}
+          id="mentions"
+          title="Mentions"
+          collapsed={collapsed.has("mentions")}
           onToggle={toggle}
         >
-          <div className="divide-y divide-divider/70">
-            <label className="flex items-center justify-between gap-3 py-3 cursor-pointer">
-              <span>
-                <span className="block text-sm font-medium text-ink">
-                  Use Single Model for Both Discovery & Synthesis
-                </span>
-                <span className="block text-xs text-mention">
-                  Uncheck to test different models for Stage 1 (Discovery) vs.
-                  Stage 2 (Synthesis)
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                checked={config.useSameModel}
-                onChange={(e) => {
-                  const useSame = e.target.checked;
-                  onChange({
-                    ...config,
-                    useSameModel: useSame,
-                    synthesis: useSame
-                      ? { ...config.discovery }
-                      : config.synthesis,
-                  });
-                }}
-                className="h-4 w-4 rounded border-divider bg-white text-mention focus:ring-action shrink-0"
-              />
-            </label>
-            <div className="py-3">
-              <EndpointEditor
-                title={
-                  config.useSameModel
-                    ? "Primary Model (Stage 1 Discovery & Stage 2 Synthesis)"
-                    : "Stage 1: Discovery & Thread Stitching Model"
-                }
-                subtitle={
-                  config.useSameModel
-                    ? "Used for both scanning the compact index and generating the final project summary."
-                    : "Fast, long-context model recommended for scanning compact activity index cards."
-                }
-                endpoint={config.discovery}
-                onUpdate={handleDiscoveryUpdate}
-              />
-            </div>
-            {!config.useSameModel && (
-              <div className="py-3">
-                <EndpointEditor
-                  title="Stage 2: Summary Synthesis Model"
-                  subtitle="Reasoning/writing model used to synthesize the packed chronological turns into your template."
-                  endpoint={config.synthesis}
-                  onUpdate={(updated) =>
-                    onChange({ ...config, synthesis: updated })
-                  }
-                />
-              </div>
-            )}
-          </div>
-        </SettingsSection>
-
-        <SettingsSection
-          id="tagging"
-          title="Tagging"
-          meta={`threshold ${config.zeroShotThreshold ?? 0.4}`}
-          collapsed={collapsed.has("tagging")}
-          onToggle={toggle}
-        >
+          <BackendChoice<NerBackendId>
+            label="NER model"
+            value={config.nerBackend ?? "local"}
+            options={NER_BACKEND_OPTIONS}
+            onChange={(v) => onChange({ ...config, nerBackend: v })}
+          />
           <div className="flex items-center justify-between gap-3 py-1">
             <div className="min-w-0">
               <div className="text-sm font-medium text-ink">
-                Zero-shot auto-tag threshold
+                Minimum chats per mention
               </div>
               <div className="text-xs text-mention">
-                Chats auto-tag when max target score ≥ threshold and beats the
-                contrast score. Retags instantly from stored scores.
+                Entities must appear in at least this many chats to count.
+                Applies instantly.
               </div>
             </div>
             <div className="flex flex-col items-end gap-1 shrink-0">
               <input
                 type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={config.zeroShotThreshold ?? 0.4}
+                min={1}
+                max={10}
+                step={1}
+                value={config.mentionMinChats ?? 4}
                 onChange={(e) =>
                   onChange({
                     ...config,
-                    zeroShotThreshold: Number(e.target.value),
+                    mentionMinChats: Number(e.target.value),
                   })
                 }
-                aria-label="Zero-shot auto-tag threshold"
+                aria-label="Minimum chats per mention"
                 className="w-24 sm:w-32 accent-action"
               />
               <span className="text-xs font-mono text-ink">
-                {(config.zeroShotThreshold ?? 0.4).toFixed(2)}
+                {config.mentionMinChats ?? 4}
               </span>
             </div>
           </div>
-        </SettingsSection>
-
-        <SettingsSection
-          id="mentions"
-          title="Mentions"
-          meta={`score floor ${config.nerScoreFloor ?? 0}`}
-          collapsed={collapsed.has("mentions")}
-          onToggle={toggle}
-        >
           <div className="flex items-center justify-between gap-3 py-1">
             <div className="min-w-0">
               <div className="text-sm font-medium text-ink">
@@ -400,12 +360,77 @@ export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMa
         </SettingsSection>
 
         <SettingsSection
-          id="synthesis"
-          title="Synthesis"
-          meta={`${config.maxTokensPerSynthesisBatch.toLocaleString()} tokens/batch`}
-          collapsed={collapsed.has("synthesis")}
+          id="tags"
+          title="tags"
+          collapsed={collapsed.has("tags")}
           onToggle={toggle}
         >
+          <EndpointEditor
+            title="Tag generation model"
+            subtitle="Authors the match/contrast labels used for auto-tagging."
+            endpoint={config.discovery}
+            defaultModel={DEFAULT_CONTRIBUTOR_MODEL}
+            onUpdate={(updated) =>
+              onChange({ ...config, discovery: updated })
+            }
+          />
+          <BackendChoice<NliBackendId>
+            label="NLI model"
+            value={config.nliBackend ?? "local"}
+            options={NLI_BACKEND_OPTIONS}
+            onChange={(v) => onChange({ ...config, nliBackend: v })}
+          />
+          <div className="flex items-center justify-between gap-3 py-1">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-ink">
+                Zero-shot auto-tag threshold
+              </div>
+              <div className="text-xs text-mention">
+                Chats auto-tag when max target score ≥ threshold and beats the
+                contrast score. Retags instantly from stored scores.
+              </div>
+            </div>
+            <div className="flex flex-col items-end gap-1 shrink-0">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={config.zeroShotThreshold ?? 0.4}
+                onChange={(e) =>
+                  onChange({
+                    ...config,
+                    zeroShotThreshold: Number(e.target.value),
+                  })
+                }
+                aria-label="Zero-shot auto-tag threshold"
+                className="w-24 sm:w-32 accent-action"
+              />
+              <span className="text-xs font-mono text-ink">
+                {(config.zeroShotThreshold ?? 0.4).toFixed(2)}
+              </span>
+            </div>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection
+          id="summaries"
+          title="summaries"
+          collapsed={collapsed.has("summaries")}
+          onToggle={toggle}
+        >
+          <TemplateSettings />
+          <div className="py-3">
+            <EndpointEditor
+              title="Summary generation model"
+              subtitle="Writes the final project summary from packed chats."
+              endpoint={config.synthesis}
+              defaultModel={DEFAULT_CONTRIBUTOR_MODEL}
+              onUpdate={(updated) =>
+                onChange({ ...config, synthesis: updated })
+              }
+            />
+          </div>
           <div className="flex items-center justify-between gap-3 py-1">
             <div className="min-w-0">
               <div className="text-sm font-medium text-ink">
@@ -450,19 +475,8 @@ export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMa
         </SettingsSection>
 
         <SettingsSection
-          id="templates"
-          title="Templates"
-          meta="summary templates"
-          collapsed={collapsed.has("templates")}
-          onToggle={toggle}
-        >
-          <TemplateSettings />
-        </SettingsSection>
-
-        <SettingsSection
           id="data"
           title="Data"
-          meta="zip backup"
           collapsed={collapsed.has("data")}
           onToggle={toggle}
         >

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_MAX_TOKENS_PER_BATCH,
-  DEFAULT_META_MODEL,
+  DEFAULT_CONTRIBUTOR_MODEL,
   DualModelConfig,
   ParsedActivityItem,
 } from "./lib/types";
@@ -46,12 +46,15 @@ import { UrlPreviewLayer } from "./components/UrlPreviewLayer";
 const MODEL_KEY = "takeout_summarizer_model_config_v1";
 
 const DEFAULT_MODEL_CONFIG: DualModelConfig = {
-  useSameModel: true,
-  discovery: { provider: "meta", model: DEFAULT_META_MODEL },
-  synthesis: { provider: "meta", model: DEFAULT_META_MODEL },
+  useSameModel: false,
+  discovery: { provider: "meta", model: DEFAULT_CONTRIBUTOR_MODEL },
+  synthesis: { provider: "meta", model: DEFAULT_CONTRIBUTOR_MODEL },
   maxTokensPerSynthesisBatch: DEFAULT_MAX_TOKENS_PER_BATCH,
   zeroShotThreshold: 0.4,
   nerScoreFloor: 0,
+  nerBackend: "local",
+  nliBackend: "local",
+  mentionMinChats: 4,
 };
 
 function localDayKey(iso: string): string {
@@ -407,7 +410,7 @@ export const App: React.FC = () => {
                 setView("threads");
                 window.scrollTo(0, 0);
               }}
-              synthesisModel={modelConfig.useSameModel ? modelConfig.discovery : modelConfig.synthesis}
+              synthesisModel={modelConfig.synthesis}
               maxTokensPerBatch={modelConfig.maxTokensPerSynthesisBatch}
               onOpenModelSettings={() => navigate("settings")}
               onNavigate={navigate}
@@ -438,6 +441,7 @@ export const App: React.FC = () => {
                 items={items}
                 entityMap={chatEntities}
                 minScore={modelConfig.nerScoreFloor ?? 0}
+                minChats={modelConfig.mentionMinChats ?? 4}
                 onEntitiesChange={setChatEntities}
                 categoryMap={threadCategories}
                 onCategoriesChange={setThreadCategories}
@@ -487,7 +491,7 @@ export const App: React.FC = () => {
                 setFocusedThread(null);
                 setView("threads");
               }}
-              synthesisModel={modelConfig.useSameModel ? modelConfig.discovery : modelConfig.synthesis}
+              synthesisModel={modelConfig.synthesis}
               maxTokensPerBatch={modelConfig.maxTokensPerSynthesisBatch}
               onOpenModelSettings={() => navigate("settings")}
               matchScores={activeScores}

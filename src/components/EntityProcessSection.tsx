@@ -38,6 +38,8 @@ interface Props {
   categoryMap: ThreadCategoryMap;
   onCategoriesChange: (map: ThreadCategoryMap) => void;
   minScore?: number;
+  /** Human-facing minimum chats per mention (default 4). */
+  minChats?: number;
 }
 
 /**
@@ -52,6 +54,7 @@ export const EntityProcessSection: React.FC<Props> = ({
   categoryMap,
   onCategoriesChange,
   minScore = 0,
+  minChats = 4,
 }) => {
   const [job, setJob] = useState<ProcessJobSnapshot>(() =>
     processRunner.getSnapshot()
@@ -147,8 +150,8 @@ export const EntityProcessSection: React.FC<Props> = ({
   }, [items, entityMap, hashes, serverVersion]);
 
   const entityCount = useMemo(
-    () => aggregateEntities(entityMap, 3, minScore).length,
-    [entityMap, minScore]
+    () => aggregateEntities(entityMap, minChats - 1, minScore).length,
+    [entityMap, minScore, minChats]
   );
 
   // The run lives in the shared processRunner (survives view switches);
@@ -306,7 +309,7 @@ export const EntityProcessSection: React.FC<Props> = ({
                 <strong className="text-ink font-semibold">
                   {entityCount}
                 </strong>{" "}
-                entities in 4+ chats
+                entities in {minChats}+ chats
               </>
             )}
           </span>

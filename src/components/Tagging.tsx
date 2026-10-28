@@ -314,7 +314,7 @@ export const Tagging: React.FC<TaggingProps> = ({
           Tags
         </h2>
         <p className="text-[13px] text-mention mt-1">
-          Auto-tag chats with ModernBERT. Counts update instantly when the
+          Auto-tag chats with zero-shot NLI. Counts update instantly when the
           threshold changes in Settings — no reprocessing needed.
         </p>
       </div>

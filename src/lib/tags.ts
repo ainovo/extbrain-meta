@@ -22,7 +22,7 @@ export interface TagDef {
   /** YYYY-MM-DD evaluation window bounds, or null for unbounded. */
   dateStart: string | null;
   dateEnd: string | null;
-  /** Per-chat ModernBERT scores, keyed by chat id. */
+  /** Per-chat zero-shot NLI scores, keyed by chat id. */
   scores: Record<string, TagScores>;
   /** Per-tag match threshold override. Falls back to the global threshold when unset. */
   threshold?: number;
@@ -82,7 +82,7 @@ export function taggedChatIds(tag: TagDef, threshold: number): string[] {
 }
 
 export function estimateSeconds(chatCount: number): number {
-  // Rough server-side ModernBERT throughput (~3 chats/sec with micro-batches).
+  // Rough server-side zero-shot throughput (~3 chats/sec with micro-batches).
   return Math.ceil(chatCount * 0.35);
 }
 

@@ -191,6 +191,12 @@ export function normalizeModelConfig(raw: unknown): DualModelConfig {
     maxTokensPerSynthesisBatch: maxTokens,
     zeroShotThreshold: threshold,
     ...(nerFloor !== undefined ? { nerScoreFloor: nerFloor } : {}),
+    nerBackend: r.nerBackend === "modal-gliner" ? "modal-gliner" : "local",
+    nliBackend: r.nliBackend === "modal-tbd" ? "modal-tbd" : "local",
+    mentionMinChats:
+      typeof r.mentionMinChats === "number" && Number.isFinite(r.mentionMinChats)
+        ? Math.min(Math.max(Math.round(r.mentionMinChats), 1), 50)
+        : 4,
   };
 }
 

@@ -41,10 +41,10 @@ import {
 } from "../src/lib/urlPreview";
 import { summarizeThreads } from "../src/lib/threads";
 import { inDateRange, taggedChatIds, type TagDef } from "../src/lib/tags";
-import { MAX_ENTITY_NAME_CHARS, aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, isCommonConnective, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, stripJsonBlobs, stripMarkdownForNer, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
+import { MAX_ENTITY_NAME_CHARS, aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, isCommonConnective, isPlausibleEntityName, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, stripJsonBlobs, stripMarkdownForNer, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
 import {
   buildEntryClassificationText,
-  classifySingleTextWithModernBert,
+  classifySingleTextZeroShot,
   filterAndRankByTargetContrast,
   normalizeZeroShotBatch,
   packItemsIntoBatches,
@@ -247,7 +247,7 @@ function renderedBoxesWired(markdown: string, ref: Date): boolean {
 }
 
 async function runTests() {
-  console.log("=== Running Takeout Parser & ModernBERT Target vs. Contrast NLI Tests ===");
+  console.log("=== Running Takeout Parser & Zero-Shot Target vs. Contrast NLI Tests ===");
 
   const items = parseTakeoutJson(JSON.stringify(FIXTURE_ENTRIES), "Fixture.json");
   assert(
@@ -269,7 +269,7 @@ async function runTests() {
   const scoresMap = new Map<string, Record<string, number>>();
   for (const item of items) {
     const text = buildEntryClassificationText(item, allLabels);
-    const scores = await classifySingleTextWithModernBert(text, allLabels);
+    const scores = await classifySingleTextZeroShot(text, allLabels);
     scoresMap.set(item.id, scores);
   }
 
@@ -493,6 +493,30 @@ async function runTests() {
       asifAgg[0].key === "asif" &&
       asifAgg[0].chatCount === 4,
     "surface variants aggregate to one person with all four chats"
+  );
+  const bottonMap: ChatEntityMap = {
+    c1: [{ name: "Alain de Botton", type: "PER" }],
+    c2: [{ name: "de Botton", type: "PER" }],
+    c3: [{ name: "Alain de Botton", type: "PER" }],
+    c4: [{ name: "Alain de Botton", type: "PER" }],
+  };
+  const bottonAgg = aggregateEntities(bottonMap, 0);
+  assert(
+    bottonAgg.length === 1 &&
+      bottonAgg[0].key === "alain de botton" &&
+      bottonAgg[0].display === "Alain de Botton" &&
+      bottonAgg[0].chatCount === 4,
+    "surname-only mentions fold into the full name with all four chats"
+  );
+  const bottonSplitMap: ChatEntityMap = {
+    c1: [{ name: "Alain de Botton", type: "PER" }],
+    c2: [{ name: "Alain de Botton", type: "PER" }],
+    c3: [{ name: "de Botton", type: "ORG" }],
+    c4: [{ name: "de Botton", type: "ORG" }],
+  };
+  assert(
+    aggregateEntities(bottonSplitMap, 0).length === 2,
+    "suffix folding never merges across different entity types"
   );
   assert(
     stripMarkdownForNer("[Bob](http://x) and `code`") === "Bob and code" &&
@@ -917,6 +941,95 @@ async function runTests() {
     "RoBERTa single-word input without Ġ still groups by adjacency"
   );
 
+  // Regression: URL query strings + template placeholders are not names.
+  // The whole spaceless blob used to reach the model, fuse into one
+  // RoBERTa word run, and come back as one "entity".
+  const queryBlob =
+    "channel=reddit&campaign_id={{CAMPAIGN_ID}}&adgroup_id={{ADGROUP_ID}}&ad_id={{AD_ID}}";
+  assert(
+    !stripMarkdownForNer(`Use ${queryBlob} for Clara Oswald`).includes(
+      "CAMPAIGN_ID"
+    ) &&
+      !stripMarkdownForNer(`Use ${queryBlob} for Clara Oswald`).includes(
+        "channel="
+      ) &&
+      stripMarkdownForNer(`Use ${queryBlob} for Clara Oswald`).includes(
+        "Clara Oswald"
+      ) &&
+      !stripMarkdownForNer("see ?channel=reddit&campaign_id=42 for Clara")
+        .includes("campaign_id") &&
+      stripMarkdownForNer("see ?channel=reddit&campaign_id=42 for Clara")
+        .includes("Clara"),
+    "stripMarkdownForNer removes URL query strings and template placeholders"
+  );
+  assert(
+    !isPlausibleEntityName(queryBlob) &&
+      !isPlausibleEntityName("Ripper), Gambit") &&
+      isPlausibleEntityName("Berkeley, CA") &&
+      isPlausibleEntityName("MYHOROS.COM") &&
+      isPlausibleEntityName("AT&T") &&
+      isPlausibleEntityName("St. Louis") &&
+      isPlausibleEntityName("San Francisco (CA)") &&
+      cleanEntityText("Ripper),") === "Ripper" &&
+      cleanEntityText("Ripper)") === "Ripper" &&
+      cleanEntityText("San Francisco (CA)") === "San Francisco (CA)",
+    "entity validation rejects query/template blobs and fused lists, cleans stray brackets"
+  );
+  // Real RoBERTa surfaces for the query blob (probe of the local
+  // tokenizer): only the first token is word-marked, so every "=" / "&" /
+  // "{{" fragment used to glue into a single word. No recovered group may
+  // now contain the blob's separators.
+  const qSurfaces = ["<s>", " channel", "=", "reddit", "&", "campaign", "_", "id", "=", "{{", "C", "AM", "PA", "IGN", "_", "ID", "}}", "&", "ad", "group", "_", "id", "=", "{{", "AD", "GROUP", "_", "ID", "}}", "&", "ad", "_", "id", "=", "{{", "AD", "_", "ID", "}}", "</s>"];
+  const qTokens = [
+    { entity: "ORG", score: 0.99, index: 3 },
+    { entity: "ORG", score: 0.99, index: 5 },
+    { entity: "ORG", score: 0.99, index: 10 },
+  ];
+  const qGroups = groupNerWords(nerWordRuns(qSurfaces, qTokens, queryBlob));
+  const qProj = projectTextAlnum(queryBlob);
+  assert(
+    qGroups.length > 0 &&
+      qGroups.every((g) => {
+        const span = recoverSpanText(queryBlob, qProj, qSurfaces, g.lo, g.hi);
+        return (
+          span !== null &&
+          !span.includes("=") &&
+          !span.includes("{") &&
+          !span.includes("&")
+        );
+      }),
+    "RoBERTa query-blob fragments never fuse into one entity span"
+  );
+  // Real RoBERTa surfaces for "Ripper), Gambit" (probe of the local
+  // tokenizer): "), " is a single punctuation token ("),"), which used to
+  // glue onto "Ripper" and fuse the two names into "Ripper), Gambit".
+  const ripSource = "Ripper), Gambit";
+  const ripSurfaces = ["<s>", " R", "ipper", "),", " Gam", "bit", "</s>"];
+  const ripTokens = [
+    { entity: "PER", score: 0.99, index: 1 },
+    { entity: "PER", score: 0.99, index: 2 },
+    { entity: "PER", score: 0.99, index: 4 },
+    { entity: "PER", score: 0.99, index: 5 },
+  ];
+  const ripWords = nerWordRuns(ripSurfaces, ripTokens, ripSource);
+  const ripGroups = groupNerWords(ripWords);
+  const ripProj = projectTextAlnum(ripSource);
+  assert(
+    ripWords.some((w) => w.text === "),") &&
+      ripGroups.length === 2 &&
+      recoverSpanText(ripSource, ripProj, ripSurfaces, ripGroups[0].lo, ripGroups[0].hi) === "Ripper" &&
+      recoverSpanText(ripSource, ripProj, ripSurfaces, ripGroups[1].lo, ripGroups[1].hi) === "Gambit",
+    "RoBERTa splits on '),' punctuation: Ripper and Gambit stay separate"
+  );
+  assert(
+    groupNerWords([
+      { lo: 0, hi: 0, text: "ripper", type: "PER", score: 0.9, glue: false, leadSpace: false },
+      { lo: 1, hi: 1, text: "),", type: null, score: 0, glue: true, leadSpace: false },
+      { lo: 2, hi: 2, text: "gambit", type: "PER", score: 0.9, glue: false, leadSpace: true },
+    ]).length === 2,
+    "groupNerWords never bridges a closing-bracket/list separator"
+  );
+
   assert(
     entityTypeLabel("DATE") === "Dates" &&
       entityTypeRank("DATE") === 4 &&
@@ -1036,6 +1149,25 @@ async function runTests() {
   assert(
     groupNerWords(nerWordRuns(citiesSurfaces, citiesTokens)).length === 2,
     "groupNerWords splits place enumerations that are not qualifiers"
+  );
+  // "Canada, UK" must not fuse: UK is short but a country, not a region
+  // code — while "Austin, TX" still merges as one City, ST reference.
+  const canadaSource = "shipped to Canada, UK and Austin, TX";
+  const canadaSurfaces = ["[CLS]", "Canada", ",", "UK", "and", "Austin", ",", "TX", "[SEP]"];
+  const canadaTokens = [
+    { entity: "B-LOC", score: 0.99, index: 1, word: "Canada" },
+    { entity: "B-LOC", score: 0.99, index: 3, word: "UK" },
+    { entity: "B-LOC", score: 0.99, index: 5, word: "Austin" },
+    { entity: "B-LOC", score: 0.99, index: 7, word: "TX" },
+  ];
+  const canadaGroups = groupNerWords(nerWordRuns(canadaSurfaces, canadaTokens));
+  const canadaProj = projectTextAlnum(canadaSource);
+  assert(
+    canadaGroups.length === 3 &&
+      recoverSpanText(canadaSource, canadaProj, canadaSurfaces, canadaGroups[0].lo, canadaGroups[0].hi) === "Canada" &&
+      recoverSpanText(canadaSource, canadaProj, canadaSurfaces, canadaGroups[1].lo, canadaGroups[1].hi) === "UK" &&
+      recoverSpanText(canadaSource, canadaProj, canadaSurfaces, canadaGroups[2].lo, canadaGroups[2].hi) === "Austin, TX",
+    "groupNerWords splits country pairs but keeps known region codes whole"
   );
   const orgSurfaces = ["[CLS]", "USPS", ",", "FedEx", "[SEP]"];
   const orgTokens = [
@@ -2388,6 +2520,14 @@ async function runTests() {
       normalizeModelConfig({ maxTokensPerSynthesisBatch: 99999999 })
         .maxTokensPerSynthesisBatch === 1048576,
     "normalizeModelConfig defaults batches to 1M and migrates the legacy 45k default"
+  );
+  assert(
+    normalizeModelConfig({}).mentionMinChats === 4 &&
+      normalizeModelConfig({ mentionMinChats: 7 }).mentionMinChats === 7 &&
+      normalizeModelConfig({ mentionMinChats: 0 }).mentionMinChats === 1 &&
+      normalizeModelConfig({ mentionMinChats: 99 }).mentionMinChats === 50 &&
+      normalizeModelConfig({ mentionMinChats: "x" }).mentionMinChats === 4,
+    "normalizeModelConfig defaults the mention threshold to 4 chats and clamps it"
   );
 
   const procItem = (

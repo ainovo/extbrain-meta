@@ -6,14 +6,15 @@ import {
 import { estimateTokens } from "./takeoutParser";
 import { truncateAtWordBoundary } from "./entities";
 
-export const MODERNBERT_MODEL_ID = "MoritzLaurer/ModernBERT-large-zeroshot-v2.0";
+export const ZEROSHOT_MODEL_ID =
+  "onnx-community/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7-ONNX";
 
 export function normalizeTagLabel(rawTag: string): string {
   return rawTag.replace(/^#+/, "").trim();
 }
 
 /**
- * Builds the text evaluated by ModernBERT for each chat entry:
+ * Builds the text evaluated by the zero-shot model for each chat entry:
  * Includes User Prompt(s) + all key paragraphs/sentences from the AI response
  * (opening paragraphs + any paragraph/sentence containing bold takeaways, metrics/%, $, domains, or label terms)
  * up to ~1,400 chars so multi-paragraph Gemini Apps responses never lose mid/late-paragraph conclusions.
@@ -209,7 +210,7 @@ export function filterAndRankByTagScores(
 }
 
 /**
- * Direct in-process ModernBERT loader & classifier (also used for Node tests or non-worker fallback).
+ * Direct in-process zero-shot loader & classifier (also used for Node tests or non-worker fallback).
  */
 let zeroShotPipeline: any = null;
 let zeroShotModelLoaded = false;
@@ -220,7 +221,7 @@ export async function loadZeroShotModel(
   if (zeroShotModelLoaded && zeroShotPipeline) return true;
 
   try {
-    onProgress?.(5, "Initializing ModernBERT-large-zeroshot-v2.0 (checking Cache API)...");
+    onProgress?.(5, "Initializing mDeBERTa zero-shot model (checking Cache API)...");
     const { pipeline, env } = await import("@huggingface/transformers");
     env.allowLocalModels = false;
     env.useBrowserCache = typeof caches !== "undefined";
@@ -229,7 +230,7 @@ export async function loadZeroShotModel(
 
     zeroShotPipeline = await pipeline(
       "zero-shot-classification",
-      MODERNBERT_MODEL_ID,
+      ZEROSHOT_MODEL_ID,
       {
         dtype: "q8",
         progress_callback: (data: any) => {
@@ -254,15 +255,15 @@ export async function loadZeroShotModel(
     );
 
     zeroShotModelLoaded = true;
-    onProgress?.(100, "ModernBERT-large-zeroshot-v2.0 ready.");
+    onProgress?.(100, "mDeBERTa zero-shot model ready.");
     return true;
   } catch (err) {
-    console.error("Failed to load ModernBERT in main thread:", err);
+    console.error("Failed to load zero-shot model in main thread:", err);
     return false;
   }
 }
 
-export async function classifySingleTextWithModernBert(
+export async function classifySingleTextZeroShot(
   text: string,
   allLabels: string[]
 ): Promise<Record<string, number>> {
@@ -272,7 +273,7 @@ export async function classifySingleTextWithModernBert(
   if (!zeroShotPipeline) {
     const ok = await loadZeroShotModel();
     if (!ok) {
-      throw new Error("ModernBERT model failed to load");
+      throw new Error("Zero-shot model failed to load");
     }
   }
 

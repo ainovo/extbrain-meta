@@ -1,6 +1,6 @@
 /**
  * Fixed category taxonomy for thread classification. Each thread is scored
- * ONCE against the 8 one-word category names with the ModernBERT zero-shot
+ * ONCE against the 8 one-word category names with the zero-shot NLI
  * endpoint ("This text is about {name}.") over its joined chat texts, and
  * takes the argmax category. One verdict per thread key persists per
  * dataset alongside entities; Top Threads reads it directly.
@@ -78,7 +78,7 @@ export const CATEGORY_TAXONOMY: CategoryDef[] = [
 export const CATEGORY_LABELS: string[] = CATEGORY_TAXONOMY.map((c) => c.id);
 
 /** Bump to invalidate stored verdicts (taxonomy or scorer change). */
-export const THREAD_CATEGORY_VERSION = 1;
+export const THREAD_CATEGORY_VERSION = 2;
 
 export type CategoryScores = Record<CategoryId, number>;
 

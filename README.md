@@ -45,7 +45,7 @@ Instead of chunking text and using vector similarities to guess relevance, ExtBr
 git clone https://github.com/ainovo/extbrain-meta.git
 cd extbrain-meta
 npm install
-npm run prepare:ner   # one-time RoBERTa NER weights (~1.8GB, verified + quantized locally)
+npm run prepare:ner   # one-time XLM-R NER weights (~1.4GB, pre-quantized ONNX port)
 npm run dev
 ```
 ## License
