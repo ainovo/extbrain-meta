@@ -17,6 +17,7 @@ import {
 import { exportFileName, exportUserDataZip } from "../lib/exportData";
 import {
   ChatEntityMap,
+  EntityAggregate,
   aggregateEntities,
   entityTypeLabel,
   entityTypeRank,
@@ -113,20 +114,30 @@ interface Props {
   config: DualModelConfig;
   onChange: (newConfig: DualModelConfig) => void;
   entityMap: ChatEntityMap;
+  /** Shared App-level aggregation (same score floor). */
+  mentionCandidates: EntityAggregate[];
 }
 
 /** Live entity cloud grouped by NER category, filtered by the score floor. */
 function EntityCloudPreview({
   entityMap,
   floor,
+  candidates,
 }: {
   entityMap: ChatEntityMap;
   floor: number;
+  /**
+   * Shared App-level aggregation (same floor). When provided, the cloud
+   * reuses it instead of re-folding the whole map on every Settings visit;
+   * otherwise it folds lazily, only once expanded.
+   */
+  candidates?: EntityAggregate[];
 }) {
   const [expanded, setExpanded] = useState(false);
   const aggregates = useMemo(
-    () => aggregateEntities(entityMap, 0, floor),
-    [entityMap, floor]
+    () =>
+      candidates ?? (expanded ? aggregateEntities(entityMap, 0, floor) : []),
+    [candidates, expanded, entityMap, floor]
   );
   const groups = useMemo(() => {
     const byType = new Map<string, typeof aggregates>();
@@ -234,7 +245,7 @@ function BackendChoice<T extends string>({
 }
 
 /** Settings page: collapsible sections, details flat without boxes. */
-export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMap }) => {
+export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMap, mentionCandidates }) => {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -356,6 +367,7 @@ export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMa
           <EntityCloudPreview
             entityMap={entityMap}
             floor={config.nerScoreFloor ?? 0}
+            candidates={mentionCandidates}
           />
         </SettingsSection>
 

@@ -21,7 +21,7 @@ import {
   BUILTIN_TEMPLATES,
   loadCustomThreadTemplates,
 } from "../lib/promptTemplates";
-import { ChatEntityMap } from "../lib/entities";
+import { ChatEntityMap, EntityAggregate } from "../lib/entities";
 import {
   ThreadCategoryMap,
   categoryLabelFor,
@@ -46,12 +46,14 @@ import { MarkdownView } from "./MarkdownView";
 import MentionSearchBar from "./MentionSearchBar";
 import { RangeSummaryBox } from "./RangeSummaryBox";
 import {
+  CategoryBreakdownRow,
   IMPORT_SOURCES,
   ImportSource,
   RangeBucket,
   RangeGranularity,
   ThreadRankMode,
   bucketDayKeys,
+  buildCategoryBreakdown,
   buildRangeStats,
   countThreadsBySource,
   dataDayBounds,
@@ -62,7 +64,7 @@ import {
   threadDurationMs,
   topMentionsByThreads,
   topThreads,
-  TOP_LIST_LIMIT,
+  MENTION_LIST_LIMIT,
 } from "../lib/topOfMind";
 import { SidebarView } from "./Sidebar";
 import { Block, BlockHeader, BlockPad, EmptyState, GhostButton } from "./ui";
@@ -84,6 +86,7 @@ const STORE_KEYS = {
   activityMode: "extbrain:topmind:activityMode",
   threadRankMode: "extbrain:topmind:threadRankMode",
   summaryTemplate: "extbrain:topmind:summaryTemplate",
+  categoryMetric: "extbrain:topmind:categoryMetric",
 } as const;
 
 function loadStored(key: string, fallback: string): string {
@@ -807,18 +810,17 @@ function ActivityChart({
 function TopThreadsSection({
   threads,
   onOpenThread,
-  entityMap,
+  mentionCandidates,
   hasEntities,
   onViewChats,
-  minScore = 0,
   categoryMap,
 }: {
   threads: ThreadSummary[];
   onOpenThread: (key: string) => void;
-  entityMap: ChatEntityMap;
+  /** Shared App-level aggregation for the mention search bar. */
+  mentionCandidates: EntityAggregate[];
   hasEntities: boolean;
   onViewChats: (keys: string[]) => void;
-  minScore?: number;
   categoryMap: ThreadCategoryMap;
 }) {
   const [mode, setMode] = usePersistentState<ThreadRankMode>(
@@ -884,10 +886,9 @@ function TopThreadsSection({
         )}
         <div className="mt-3">
           <MentionSearchBar
-            entityMap={entityMap}
+            candidates={mentionCandidates}
             hasEntities={hasEntities}
             onViewChats={onViewChats}
-            minScore={minScore}
           />
         </div>
       </BlockPad>
@@ -1095,7 +1096,7 @@ function MentionSection({
   minScore?: number;
 }) {
   const highlights = useMemo(
-    () => topMentionsByThreads(entityMap, items, nerType, TOP_LIST_LIMIT, minScore),
+    () => topMentionsByThreads(entityMap, items, nerType, MENTION_LIST_LIMIT, minScore),
     [entityMap, items, nerType, minScore]
   );
   return (
@@ -1138,9 +1139,114 @@ function MentionSection({
   );
 }
 
+type CategoryMetric = "duration" | "chats" | "threads";
+
+/**
+ * One 100% stripe of per-category shares over the threads in range, with a
+ * Duration/Chats/Threads toggle. Duration sums thread time spans
+ * (single-chat threads span zero); chats and threads are plain counts.
+ * Threads without a stored verdict bucket into Untagged so shares reconcile.
+ */
+function CategoryStripe({
+  threads,
+  categoryMap,
+}: {
+  threads: ThreadSummary[];
+  categoryMap: ThreadCategoryMap;
+}) {
+  const [metric, setMetric] = usePersistentState<CategoryMetric>(
+    STORE_KEYS.categoryMetric,
+    "chats",
+    ["duration", "chats", "threads"]
+  );
+  const breakdown = useMemo(
+    () => buildCategoryBreakdown(threads, categoryMap),
+    [threads, categoryMap]
+  );
+  if (threads.length === 0) return null;
+  const total =
+    metric === "duration"
+      ? breakdown.totalDurationMs
+      : metric === "chats"
+        ? breakdown.totalChats
+        : breakdown.totalThreads;
+  const valueOf = (r: CategoryBreakdownRow): number =>
+    metric === "duration" ? r.durationMs : metric === "chats" ? r.chats : r.threads;
+  const rows = [...breakdown.rows]
+    .filter((r) => r.chats > 0)
+    .sort((a, b) => valueOf(b) - valueOf(a));
+  const countText = (r: CategoryBreakdownRow): string =>
+    metric === "duration"
+      ? formatDuration(r.durationMs)
+      : `${valueOf(r).toLocaleString()} ${metric}`;
+  return (
+    <Block>
+      <BlockPad>
+        <BlockHeader
+          title="Activity Category"
+          right={
+            <Segmented
+              label="Category metric"
+              value={metric}
+              onChange={setMetric}
+              options={[
+                { value: "duration", label: "Duration" },
+                { value: "chats", label: "Chats" },
+                { value: "threads", label: "Threads" },
+              ]}
+            />
+          }
+        />
+        <div
+          className="mt-3 flex h-2.5 w-full gap-[3px] overflow-hidden rounded-full bg-divider/40"
+          role="img"
+          aria-label={`Category shares by ${metric}`}
+        >
+          {rows.map((r) => {
+            const pct = total > 0 ? (valueOf(r) / total) * 100 : 0;
+            if (pct <= 0) return null;
+            return (
+              <div
+                key={r.id}
+                style={{ flexGrow: pct, flexShrink: 1, flexBasis: 0 }}
+                className={r.id === "untagged" ? "bg-mention/30" : "bg-mention"}
+                title={`${r.id === "untagged" ? "Untagged" : `#${r.id}`}: ${pct.toFixed(1)}% (${countText(r)})`}
+              />
+            );
+          })}
+        </div>
+        <ul className="mt-2 space-y-1">
+          {rows.map((r) => {
+            const pct = total > 0 ? (valueOf(r) / total) * 100 : 0;
+            return (
+              <li key={r.id} className="flex items-center gap-2 text-xs">
+                {r.id === "untagged" ? (
+                  <span className="font-medium text-ink">Untagged</span>
+                ) : (
+                  <span className="shrink-0 rounded-md bg-tag px-1.5 py-0.5 text-[10px] font-medium text-mention">
+                    #{r.id}
+                  </span>
+                )}
+                <span className="ml-auto font-mono text-ink">
+                  {pct.toFixed(0)}%
+                </span>
+                <span className="w-24 text-right font-mono text-mention/60">
+                  {countText(r)}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      </BlockPad>
+    </Block>
+  );
+}
+
 export const TopOfMind: React.FC<{
   items: ParsedActivityItem[];
   entityMap: ChatEntityMap;
+  /** Shared App-level aggregation for the mention search bar. */
+  mentionCandidates: EntityAggregate[];
   categoryMap: ThreadCategoryMap;
   uuid: string;
   onOpenThread: (key: string) => void;
@@ -1166,6 +1272,7 @@ export const TopOfMind: React.FC<{
   maxTokensPerBatch,
   onOpenModelSettings,
   minScore = 0,
+  mentionCandidates,
 }) => {
   const [preset, setPreset] = usePersistentState<RangePreset>(
     STORE_KEYS.preset,
@@ -1341,14 +1448,15 @@ export const TopOfMind: React.FC<{
         onOpenModelSettings={onOpenModelSettings}
       />
 
+      <CategoryStripe threads={threads} categoryMap={categoryMap} />
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <TopThreadsSection
           threads={titledThreads}
           onOpenThread={onOpenThread}
-          entityMap={entityMap}
+          mentionCandidates={mentionCandidates}
           hasEntities={hasEntities}
           onViewChats={onViewChats}
-          minScore={minScore}
           categoryMap={categoryMap}
         />
         <ActionItemsSection

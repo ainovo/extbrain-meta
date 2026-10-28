@@ -1,18 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Tag as TagIcon,
+  Hash,
   AtSign,
   MessagesSquare,
   ExternalLink,
   CalendarDays,
   X,
 } from "lucide-react";
+import { displayTagName } from "../lib/tags";
 import {
   DEFAULT_MAX_TOKENS_PER_BATCH,
   ModelEndpointConfig,
   ParsedActivityItem,
 } from "../lib/types";
-import { ChatEntityMap } from "../lib/entities";
+import { ChatEntityMap, EntityAggregate } from "../lib/entities";
 import { formatDayRangeLabel } from "../lib/topOfMind";
 import { splitTextWithUrls } from "../lib/urlPreview";
 import { MarkdownInline, MarkdownView } from "./MarkdownView";
@@ -78,8 +79,9 @@ interface Props {
   items: ParsedActivityItem[];
   totalCount: number;
   entityMap: ChatEntityMap;
+  /** Shared App-level aggregation for the mention search bar. */
+  mentionCandidates: EntityAggregate[];
   onSelectEntities: (keys: string[]) => void;
-  minScore?: number;
   scrollTarget: { day: string | null; nonce: number };
   onVisibleDayChange: (dayKey: string) => void;
   activeTags: ActiveTagInfo[];
@@ -253,8 +255,8 @@ export const HistoriesView: React.FC<Props> = ({
   items,
   totalCount,
   entityMap,
+  mentionCandidates,
   onSelectEntities,
-  minScore = 0,
   scrollTarget,
   onVisibleDayChange,
   activeTags,
@@ -483,8 +485,8 @@ export const HistoriesView: React.FC<Props> = ({
                       title="Remove this tag from the filter"
                       className="inline-flex items-center justify-center gap-1.5 rounded-full bg-action px-3 py-1 text-xs font-medium text-white hover:bg-action-hover transition-colors"
                     >
-                      <TagIcon className="w-3.5 h-3.5" />
-                      {t.name}
+                      <Hash className="w-3.5 h-3.5" />
+                      {displayTagName(t.name)}
                       <X className="w-3 h-3 opacity-60" />
                     </button>
                     <TagThresholdControl
@@ -503,10 +505,9 @@ export const HistoriesView: React.FC<Props> = ({
       {!isThreadView && (
         <div className="px-1 sm:px-4 pt-3">
           <MentionSearchBar
-            entityMap={entityMap}
+            candidates={mentionCandidates}
             hasEntities={Object.keys(entityMap).length > 0}
             onViewChats={onSelectEntities}
-            minScore={minScore}
             noun="chats"
           />
         </div>

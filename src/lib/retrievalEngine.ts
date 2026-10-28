@@ -60,9 +60,10 @@ export function buildEntryClassificationText(
     }
   }
 
-  return `Question:\n${promptPart}\n\nAnswer:\n${picked
-    .join("\n")
-    .slice(0, 1400)}`.trim();
+  return `Question:\n${promptPart}\n\nAnswer:\n${truncateAtWordBoundary(
+    picked.join("\n"),
+    1400
+  )}`.trim();
 }
 
 export interface ScoredEntryMatch {

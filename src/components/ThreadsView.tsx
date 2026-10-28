@@ -16,6 +16,8 @@ const PAGE_SIZE = 20;
 interface ThreadsViewProps {
   items: ParsedActivityItem[];
   entityMap: ChatEntityMap;
+  /** Shared App-level aggregation for the mention search bar. */
+  mentionCandidates: EntityAggregate[];
   onOpenThread: (key: string) => void;
   activeDateRange?: { start: string; end: string } | null;
   onClearDateRange?: () => void;
@@ -40,15 +42,82 @@ function localDayKey(iso: string): string {
   return `${y}-${m}-${day}`;
 }
 
-interface ThreadWithMentions extends ThreadSummary {
-  topMentions: EntityAggregate[];
-}
-
 type SortMode = "chatted" | "recent";
+
+/**
+ * One rendered thread row; its top mentions fold only this thread's chats.
+ * Previously every menu visit folded mentions for ALL threads up front
+ * (one aggregateEntities per thread), stalling navigation on large
+ * histories. Now only mounted (visible) rows pay, and the subset per row
+ * is tiny.
+ */
+const ThreadRow = React.memo(function ThreadRow({
+  thread,
+  entityMap,
+  minScore,
+  onOpenThread,
+}: {
+  thread: ThreadSummary;
+  entityMap: ChatEntityMap;
+  minScore: number;
+  onOpenThread: (key: string) => void;
+}) {
+  const topMentions = useMemo(
+    () =>
+      topEntitiesForChatIds(
+        thread.chats.map((c) => c.id),
+        entityMap,
+        3,
+        minScore
+      ),
+    [thread, entityMap, minScore]
+  );
+  const range =
+    localDayKey(thread.startIso) === localDayKey(thread.endIso)
+      ? fmtDay(thread.startIso)
+      : `${fmtDay(thread.startIso)} → ${fmtDay(thread.endIso)}`;
+  return (
+    <li>
+      <div className="flex items-start gap-3 px-1 py-3 group">
+        <button
+          type="button"
+          onClick={() => onOpenThread(thread.key)}
+          className="min-w-0 flex-1 text-left"
+          title={`View ${thread.count} ${thread.count === 1 ? "chat" : "chats"} in this thread`}
+        >
+          <div className="text-sm font-medium text-ink group-hover:underline underline-offset-2 line-clamp-2">
+            <MarkdownInline markdown={thread.title} />
+          </div>
+          <div className="text-[11px] text-mention mt-0.5">
+            {thread.count} {thread.count === 1 ? "chat" : "chats"} ·{" "}
+            {range}
+          </div>
+          {topMentions.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-1.5">
+              {topMentions.map((m) => (
+                <span
+                  key={m.key}
+                  title={`${m.display} — in ${m.chatCount} of this thread's chats`}
+                  className="inline-flex items-center gap-1 rounded-full bg-mention px-2 py-0.5 text-[11px] font-medium text-white"
+                >
+                  {m.display}
+                  <span className="font-mono text-white/70">
+                    {m.chatCount}
+                  </span>
+                </span>
+              ))}
+            </div>
+          )}
+        </button>
+      </div>
+    </li>
+  );
+});
 
 export const ThreadsView: React.FC<ThreadsViewProps> = ({
   items,
   entityMap,
+  mentionCandidates,
   onOpenThread,
   activeDateRange,
   onClearDateRange,
@@ -62,22 +131,8 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
 
   const threads = useMemo(() => summarizeThreads(items), [items]);
 
-  const withMentions: ThreadWithMentions[] = useMemo(
-    () =>
-      threads.map((t) => ({
-        ...t,
-        topMentions: topEntitiesForChatIds(
-          t.chats.map((c) => c.id),
-          entityMap,
-          3,
-          minScore
-        ),
-      })),
-    [threads, entityMap, minScore]
-  );
-
   const sortedThreads = useMemo(() => {
-    const list = [...withMentions];
+    const list = [...threads];
     list.sort((a, b) => {
       if (sort === "chatted") {
         if (b.count !== a.count) return b.count - a.count;
@@ -85,7 +140,7 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
       return b.endIso.localeCompare(a.endIso);
     });
     return list;
-  }, [withMentions, sort]);
+  }, [threads, sort]);
 
   useEffect(() => {
     setRenderCount(PAGE_SIZE);
@@ -182,10 +237,9 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
 
       {(threads.length > 0 || activeEntities.length > 0) && (
         <MentionSearchBar
-          entityMap={entityMap}
+          candidates={mentionCandidates}
           hasEntities={Boolean(Object.keys(entityMap).length)}
           onViewChats={onSelectEntities}
-          minScore={minScore}
           initialKeys={activeEntities}
         />
       )}
@@ -201,48 +255,15 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
       ) : (
         <>
         <ul className="divide-y divide-divider/70">
-          {sortedThreads.slice(0, renderCount).map((t) => {
-            const range =
-              localDayKey(t.startIso) === localDayKey(t.endIso)
-                ? fmtDay(t.startIso)
-                : `${fmtDay(t.startIso)} → ${fmtDay(t.endIso)}`;
-            return (
-              <li key={t.key}>
-                <div className="flex items-start gap-3 px-1 py-3 group">
-                  <button
-                    type="button"
-                    onClick={() => onOpenThread(t.key)}
-                    className="min-w-0 flex-1 text-left"
-                    title={`View ${t.count} ${t.count === 1 ? "chat" : "chats"} in this thread`}
-                  >
-                    <div className="text-sm font-medium text-ink group-hover:underline underline-offset-2 line-clamp-2">
-                      <MarkdownInline markdown={t.title} />
-                    </div>
-                    <div className="text-[11px] text-mention mt-0.5">
-                      {t.count} {t.count === 1 ? "chat" : "chats"} ·{" "}
-                      {range}
-                    </div>
-                    {t.topMentions.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 mt-1.5">
-                        {t.topMentions.map((m) => (
-                          <span
-                            key={m.key}
-                            title={`${m.display} — in ${m.chatCount} of this thread's chats`}
-                            className="inline-flex items-center gap-1 rounded-full bg-mention px-2 py-0.5 text-[11px] font-medium text-white"
-                          >
-                            {m.display}
-                            <span className="font-mono text-white/70">
-                              {m.chatCount}
-                            </span>
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </button>
-                </div>
-              </li>
-            );
-           })}
+          {sortedThreads.slice(0, renderCount).map((t) => (
+            <ThreadRow
+              key={t.key}
+              thread={t}
+              entityMap={entityMap}
+              minScore={minScore}
+              onOpenThread={onOpenThread}
+            />
+          ))}
          </ul>
          {renderCount < sortedThreads.length && (
            <div ref={setSentinel} className="h-4" aria-hidden />

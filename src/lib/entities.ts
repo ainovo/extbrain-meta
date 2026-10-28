@@ -336,6 +336,21 @@ export function stripMarkdownForNer(text: string): string {
   s = s.replace(/\$\{[^}\n]*\}/g, " ");
   s = s.replace(/\bwww\.\S+/g, " ");
   s = s.replace(/\S+=\S*/g, " ");
+  // CJK scripts use no spaces, so sentencepiece sees "周末要去whistler滑雪"
+  // as one spaceless blob and the model tags the whole string when only
+  // "whistler" is a place. Isolate ASCII words at Han/Hiragana/Katakana/
+  // Hangul boundaries ("周末要去 whistler 滑雪") so each becomes its own
+  // word. Runs after URL removal (never split inside a URL) and before
+  // whitespace collapsing (which absorbs the joins). Digits stay glued
+  // ("2026年" must not split, or DATE spans break).
+  s = s.replace(
+    /([\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af])([A-Za-z])/g,
+    "$1 $2"
+  );
+  s = s.replace(
+    /([A-Za-z])([\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af])/g,
+    "$1 $2"
+  );
   s = s.replace(/^#{1,6}\s+/gm, "");
   s = s.replace(/^>\s?/gm, "");
   s = s.replace(/^\s*([-*+]\s+|\d+[.)]\s+)/gm, "");
@@ -355,13 +370,21 @@ export function stripMarkdownForNer(text: string): string {
  * Truncate text to maxLen without cutting mid-word: if the cut lands inside
  * a word, back off to the previous whitespace. Prevents dangling fragments
  * ("...sp" cut from "spending") from becoming phantom entities downstream.
+ * Spaceless text (e.g. CJK) has no whitespace to back off to: a trailing
+ * ASCII run ("whist|ler") is still a partial word, so back off to its
+ * start, and never split a UTF-16 surrogate pair (astral CJK, emoji). A
+ * trailing CJK character is already whole, so anything else cuts cleanly.
  */
 export function truncateAtWordBoundary(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
-  const cut = text.slice(0, maxLen);
+  let end = maxLen;
+  if (end > 0 && /[\ud800-\udbff]/.test(text[end - 1] ?? "")) end -= 1;
+  const cut = text.slice(0, end);
   const lastSpace = cut.search(/\s(?=\S*$)/);
-  if (lastSpace <= 0) return cut;
-  return cut.slice(0, lastSpace);
+  if (lastSpace > 0) return cut.slice(0, lastSpace);
+  const run = /[A-Za-z0-9]+$/.exec(cut);
+  if (run && run.index > 0) return cut.slice(0, run.index);
+  return cut;
 }
 
 /**
@@ -487,29 +510,59 @@ interface EntityAccumulator {
 function foldSuffixMentions(
   acc: Map<string, EntityAccumulator>
 ): Map<string, EntityAccumulator> {
-  const domType = (a: EntityAccumulator): string =>
-    [...a.types.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? "MISC";
-  const mentions = (a: EntityAccumulator): number =>
-    [...a.forms.values()].reduce((s, n) => s + n, 0);
-  const words = (k: string): string[] => k.split(/\s+/);
+  // Per-key fold inputs, computed once up front. Previously domType(),
+  // mentions() and words() were recomputed for every (key, candidate)
+  // pair, turning an O(K^2) scan into O(K^2) sorts, splits and reduces.
+  const wordList = new Map<string, string[]>();
+  const domTypes = new Map<string, string>();
+  const mentionCounts = new Map<string, number>();
+  // A trailing-subsequence match requires equal last words, so only keys
+  // sharing a last word can ever match — this buckets the pair scan with
+  // no change in outcome.
+  const byLastWord = new Map<string, string[]>();
+  for (const [key, a] of acc) {
+    const w = key.split(/\s+/);
+    wordList.set(key, w);
+    domTypes.set(
+      key,
+      [...a.types.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? "MISC"
+    );
+    mentionCounts.set(
+      key,
+      [...a.forms.values()].reduce((s, n) => s + n, 0)
+    );
+    const last = w[w.length - 1];
+    const bucket = byLastWord.get(last);
+    if (bucket) bucket.push(key);
+    else byLastWord.set(last, [key]);
+  }
   const parent = new Map<string, string>();
   for (const key of acc.keys()) {
-    const wk = words(key);
+    const wk = wordList.get(key)!;
+    const cands = byLastWord.get(wk[wk.length - 1]) ?? [];
     let best: string | null = null;
-    for (const cand of acc.keys()) {
+    for (const cand of cands) {
       if (cand === key) continue;
-      const wc = words(cand);
+      const wc = wordList.get(cand)!;
       if (wc.length <= wk.length) continue;
-      if (domType(acc.get(cand)!) !== domType(acc.get(key)!)) continue;
-      if (!wc.slice(-wk.length).every((w, i) => w === wk[i])) continue;
+      if (domTypes.get(cand) !== domTypes.get(key)) continue;
+      let match = true;
+      for (let i = 0; i < wk.length; i++) {
+        if (wc[wc.length - wk.length + i] !== wk[i]) {
+          match = false;
+          break;
+        }
+      }
+      if (!match) continue;
       const bc = acc.get(cand)!;
       const bb = best === null ? null : acc.get(best)!;
       if (
         bb === null ||
         bc.chats.size > bb.chats.size ||
-        (bc.chats.size === bb.chats.size && mentions(bc) > mentions(bb)) ||
         (bc.chats.size === bb.chats.size &&
-          mentions(bc) === mentions(bb) &&
+          mentionCounts.get(cand)! > mentionCounts.get(best!)!) ||
+        (bc.chats.size === bb.chats.size &&
+          mentionCounts.get(cand) === mentionCounts.get(best!) &&
           cand < best!)
       ) {
         best = cand;

@@ -18,7 +18,7 @@ import {
   scoresToCategories,
   threadNeedsCategoryScoring,
 } from "./categoryTags";
-import { summarizeThreads } from "./threads";
+import { summarizeThreads, ThreadSummary } from "./threads";
 
 export interface ProcessQueueItem {
   id: string;
@@ -71,6 +71,65 @@ export function buildNerInputText(item: ParsedActivityItem): string {
   return stripMarkdownForNer(buildEntryClassificationText(item, []));
 }
 
+const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+
+/**
+ * Per-chat NER text+hash cache: buildNerInputText is pure in the item
+ * object, which the app keeps stable across navigations, so repeat scans
+ * (Load revisits, version-poll refires, per-batch refreshes) reuse text and
+ * hash instead of re-running the full strip pipeline per chat. WeakMap:
+ * entries die with replaced items (imports/restores), so the cache can't
+ * go stale or leak across datasets.
+ */
+const nerInputCache = new WeakMap<
+  ParsedActivityItem,
+  { text: string; hash: string }
+>();
+
+function nerTextAndHash(it: ParsedActivityItem): {
+  text: string;
+  hash: string;
+} {
+  let cached = nerInputCache.get(it);
+  if (!cached) {
+    const text = buildNerInputText(it);
+    cached = { text, hash: entityTextHash(text) };
+    nerInputCache.set(it, cached);
+  }
+  return cached;
+}
+
+type QueuedChat = ProcessQueueItem & { ts: string };
+
+/** Single-chat pending decision shared by the sync and async builders. */
+function processQueueEntryFor(
+  it: ParsedActivityItem,
+  baseMap: ChatEntityMap,
+  baseHashes: ChatEntityHashMap,
+  serverVersion: number | null
+): QueuedChat | null {
+  const { text, hash } = nerTextAndHash(it);
+  if (
+    !chatNeedsProcessing({
+      hasEntities: it.id in baseMap,
+      entry: baseHashes[it.id],
+      hash,
+      serverVersion,
+    })
+  ) {
+    return null;
+  }
+  return { id: it.id, text, hash, ts: it.timestamp ?? "" };
+}
+
+function sortQueueNewestFirst(queue: QueuedChat[]): void {
+  queue.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+}
+
+function stripQueueMeta(queue: QueuedChat[]): ProcessQueueItem[] {
+  return queue.map(({ id, text, hash }) => ({ id, text, hash }));
+}
+
 /**
  * Chats needing (re-)processing, newest first: missing entities, changed
  * text, or a record from an older processor version. Sort is stable, so
@@ -82,24 +141,13 @@ export function buildProcessQueue(
   baseHashes: ChatEntityHashMap,
   serverVersion: number | null
 ): ProcessQueueItem[] {
-  const queue: Array<ProcessQueueItem & { ts: string }> = [];
+  const queue: QueuedChat[] = [];
   for (const it of items) {
-    const text = buildNerInputText(it);
-    const hash = entityTextHash(text);
-    if (
-      !chatNeedsProcessing({
-        hasEntities: it.id in baseMap,
-        entry: baseHashes[it.id],
-        hash,
-        serverVersion,
-      })
-    ) {
-      continue;
-    }
-    queue.push({ id: it.id, text, hash, ts: it.timestamp ?? "" });
+    const entry = processQueueEntryFor(it, baseMap, baseHashes, serverVersion);
+    if (entry) queue.push(entry);
   }
-  queue.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
-  return queue.map(({ id, text, hash }) => ({ id, text, hash }));
+  sortQueueNewestFirst(queue);
+  return stripQueueMeta(queue);
 }
 
 /**
@@ -108,25 +156,88 @@ export function buildProcessQueue(
  * are never scored). A thread requeues only when its text changed or its
  * verdict predates the current taxonomy/scorer version.
  */
+/** Single-thread pending decision shared by the sync and async builders. */
+function categoryQueueEntryFor(
+  t: ThreadSummary,
+  baseThreadCategories: ThreadCategoryMap
+): ProcessQueueItem | null {
+  const text = buildThreadScoringText(t.chats);
+  const hash = entityTextHash(text);
+  if (
+    !threadNeedsCategoryScoring({
+      entry: baseThreadCategories[t.key],
+      hash,
+    })
+  ) {
+    return null;
+  }
+  return { id: t.key, text, hash };
+}
+
 export function buildThreadCategoryQueue(
   items: ParsedActivityItem[],
   baseThreadCategories: ThreadCategoryMap
 ): ProcessQueueItem[] {
   const queue: ProcessQueueItem[] = [];
   for (const t of summarizeThreads(items)) {
-    const text = buildThreadScoringText(t.chats);
-    const hash = entityTextHash(text);
-    if (
-      !threadNeedsCategoryScoring({
-        entry: baseThreadCategories[t.key],
-        hash,
-      })
-    ) {
-      continue;
-    }
-    queue.push({ id: t.key, text, hash });
+    const entry = categoryQueueEntryFor(t, baseThreadCategories);
+    if (entry) queue.push(entry);
   }
   return queue;
+}
+
+export interface ProcessQueues {
+  ner: ProcessQueueItem[];
+  cats: ProcessQueueItem[];
+}
+
+/**
+ * Same pending-work result as buildProcessQueue + buildThreadCategoryQueue,
+ * computed in chunks with yields to the event loop so mounting the Load
+ * page never blocks navigation and paint on large histories. Returns empty
+ * queues when isCancelled() trips (the caller discards stale results).
+ */
+export async function buildProcessQueuesAsync(
+  items: ParsedActivityItem[],
+  baseMap: ChatEntityMap,
+  baseHashes: ChatEntityHashMap,
+  serverVersion: number | null,
+  baseThreadCategories: ThreadCategoryMap,
+  opts?: { chunk?: number; isCancelled?: () => boolean }
+): Promise<ProcessQueues> {
+  const empty: ProcessQueues = { ner: [], cats: [] };
+  const chunk = Math.max(1, opts?.chunk ?? 500);
+  const isCancelled = opts?.isCancelled ?? (() => false);
+  const nerQueue: QueuedChat[] = [];
+  for (let i = 0; i < items.length; i += chunk) {
+    if (isCancelled()) return empty;
+    const end = Math.min(items.length, i + chunk);
+    for (let j = i; j < end; j++) {
+      const entry = processQueueEntryFor(
+        items[j],
+        baseMap,
+        baseHashes,
+        serverVersion
+      );
+      if (entry) nerQueue.push(entry);
+    }
+    await tick();
+  }
+  if (isCancelled()) return empty;
+  sortQueueNewestFirst(nerQueue);
+  const cats: ProcessQueueItem[] = [];
+  const threads = summarizeThreads(items);
+  for (let i = 0; i < threads.length; i += chunk) {
+    if (isCancelled()) return empty;
+    const end = Math.min(threads.length, i + chunk);
+    for (let j = i; j < end; j++) {
+      const entry = categoryQueueEntryFor(threads[j], baseThreadCategories);
+      if (entry) cats.push(entry);
+    }
+    await tick();
+  }
+  if (isCancelled()) return empty;
+  return { ner: stripQueueMeta(nerQueue), cats };
 }
 
 interface BatchResult {

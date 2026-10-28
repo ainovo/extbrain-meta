@@ -9,14 +9,14 @@ import { Play, RotateCcw, Square } from "lucide-react";
 import { ParsedActivityItem } from "../lib/types";
 import {
   ProcessJobSnapshot,
-  buildProcessQueue,
-  buildThreadCategoryQueue,
+  ProcessQueueItem,
+  buildProcessQueuesAsync,
   processRunner,
 } from "../lib/processRunner";
 import {
   ChatEntityHashMap,
   ChatEntityMap,
-  aggregateEntities,
+  EntityAggregate,
   entityStorageInfo,
   loadChatEntityHashes,
   saveChatEntityHashes,
@@ -34,12 +34,20 @@ interface Props {
   uuid: string;
   items: ParsedActivityItem[];
   entityMap: ChatEntityMap;
+  /** Shared App-level aggregation (same score floor), for the count readout. */
+  mentionCandidates: EntityAggregate[];
   onEntitiesChange: (map: ChatEntityMap) => void;
   categoryMap: ThreadCategoryMap;
   onCategoriesChange: (map: ThreadCategoryMap) => void;
-  minScore?: number;
   /** Human-facing minimum chats per mention (default 4). */
   minChats?: number;
+}
+
+function readStorageInfo(uuid: string) {
+  const totalKB = localStorageTotalKB();
+  const ent = entityStorageInfo(uuid);
+  const persistError = lastPersistError();
+  return { totalKB, ent, persistError };
 }
 
 /**
@@ -50,10 +58,10 @@ export const EntityProcessSection: React.FC<Props> = ({
   uuid,
   items,
   entityMap,
+  mentionCandidates,
   onEntitiesChange,
   categoryMap,
   onCategoriesChange,
-  minScore = 0,
   minChats = 4,
 }) => {
   const [job, setJob] = useState<ProcessJobSnapshot>(() =>
@@ -118,15 +126,39 @@ export const EntityProcessSection: React.FC<Props> = ({
   // text, older processor), then one category verdict per thread (missing
   // verdict, changed thread text, older taxonomy). Records are per unit,
   // so an interrupted run resumes where it stopped instead of restarting.
-  const pendingQueues = useMemo(() => {
-    const ner = buildProcessQueue(items, entityMap, hashes, serverVersion);
-    const cats = buildThreadCategoryQueue(items, categoryMap);
-    return { ner, cats };
-  }, [items, entityMap, hashes, serverVersion, categoryMap]);
-  const pendingCount = pendingQueues.ner.length + pendingQueues.cats.length;
+  // Computed off the render path in chunks: the full-corpus text+hash scan
+  // blocks navigation for seconds on large histories when run synchronously
+  // in render (and refires when the health poll resolves the processor
+  // version). While a run is active the runner's own progress drives the
+  // UI, so queues recompute only when it settles.
+  const [pendingQueues, setPendingQueues] = useState<{
+    ner: ProcessQueueItem[];
+    cats: ProcessQueueItem[];
+  } | null>(null);
+  useEffect(() => {
+    if (job.status === "running" && job.uuid === uuid) return;
+    let cancelled = false;
+    setPendingQueues(null);
+    void buildProcessQueuesAsync(
+      items,
+      entityMap,
+      hashes,
+      serverVersion,
+      categoryMap,
+      { isCancelled: () => cancelled }
+    ).then((queues) => {
+      if (!cancelled) setPendingQueues(queues);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [items, entityMap, hashes, serverVersion, categoryMap, uuid, job.status, job.uuid]);
+  const pendingCount =
+    (pendingQueues?.ner.length ?? 0) + (pendingQueues?.cats.length ?? 0);
   // Name each phase: a combined "N left" can exceed the chat count (every
   // chat needs both steps), which reads as a bug.
   const resumeLabel = (() => {
+    if (!pendingQueues) return "Checking…";
     if (processedCount === 0) return "Process chats";
     if (pendingCount === 0) return "Processing complete";
     const parts: string[] = [];
@@ -149,9 +181,13 @@ export const EntityProcessSection: React.FC<Props> = ({
     return n;
   }, [items, entityMap, hashes, serverVersion]);
 
+  // Count readout off the shared aggregation: aggregateEntities keeps
+  // entries with chats.size > minChats, so filtering the minChats=0
+  // candidates by chatCount >= minChats is the identical set, without a
+  // second full fold on every Load visit.
   const entityCount = useMemo(
-    () => aggregateEntities(entityMap, minChats - 1, minScore).length,
-    [entityMap, minScore, minChats]
+    () => mentionCandidates.filter((c) => c.chatCount >= minChats).length,
+    [mentionCandidates, minChats]
   );
 
   // The run lives in the shared processRunner (survives view switches);
@@ -215,14 +251,17 @@ export const EntityProcessSection: React.FC<Props> = ({
     getPersistOutcomeVersion,
     getPersistOutcomeVersion
   );
-  // Storage readout: recomputed per batch while running (job.done ticks)
-  // so stuck persistence is visible without opening devtools. A recorded
-  // save failure names the error — no more guessing behind a progress bar.
-  const storageInfo = useMemo(() => {
-    const totalKB = localStorageTotalKB();
-    const ent = entityStorageInfo(uuid);
-    const persistError = lastPersistError();
-    return { totalKB, ent, persistError };
+  // Storage readout: localStorageTotalKB serializes the whole store, so
+  // refresh it after paint and at most once per 2s — per-batch saves during
+  // a run must not each pay a full-store stringify. A recorded save failure
+  // still names the error, so stuck persistence stays visible.
+  const [storageInfo, setStorageInfo] = useState(() => readStorageInfo(uuid));
+  const lastStorageRead = useRef(0);
+  useEffect(() => {
+    if (Date.now() - lastStorageRead.current < 2000) return;
+    lastStorageRead.current = Date.now();
+    const t = setTimeout(() => setStorageInfo(readStorageInfo(uuid)), 0);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uuid, job.done, entityMap, categoryMap, persistOutcome]);
 
@@ -235,7 +274,7 @@ export const EntityProcessSection: React.FC<Props> = ({
         <p className="text-[13px] text-mention mt-1">
           Finds people, organizations, and places with RoBERTa-large NER for
           mention search and highlights, then tags each thread with one of
-          8 categories for Top Threads. Newest first, keeps running when
+          9 categories for Top Threads. Newest first, keeps running when
           you switch pages.
         </p>
       </div>

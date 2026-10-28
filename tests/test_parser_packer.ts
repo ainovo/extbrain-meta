@@ -1,4 +1,4 @@
-import { htmlFragmentToMarkdown, parseChatGptJson, parseTakeoutJson } from "../src/lib/takeoutParser";
+import { estimateTokens, htmlFragmentToMarkdown, parseChatGptJson, parseTakeoutJson, refreshTokenEstimates } from "../src/lib/takeoutParser";
 import { renderRichText, stripLinkMarkup } from "../src/lib/richText";
 import {
   actionItemsDueBetween,
@@ -17,6 +17,7 @@ import {
 import {
   IMPORT_SOURCES,
   bucketDayKeys,
+  buildCategoryBreakdown,
   buildDailyStats,
   buildRangeStats,
   countThreadsBySource,
@@ -81,6 +82,7 @@ import {
 import {
   buildNerInputText,
   buildProcessQueue,
+  buildProcessQueuesAsync,
   buildThreadCategoryQueue,
   processRunner,
 } from "../src/lib/processRunner";
@@ -524,6 +526,17 @@ async function runTests() {
       stripMarkdownForNer("# Title\n\nBody **bold** end") ===
         "Title\n\nBody bold end",
     "stripMarkdownForNer unwraps links/code, drops fences, keeps breaks"
+  );
+  assert(
+    stripMarkdownForNer("周末要去whistler滑雪") === "周末要去 whistler 滑雪" &&
+      stripMarkdownForNer("去 whistler滑雪 了") === "去 whistler 滑雪 了" &&
+      stripMarkdownForNer("2026年3月去滑雪") === "2026年3月去滑雪",
+    "stripMarkdownForNer isolates English words in CJK text, keeps digit dates glued"
+  );
+  assert(
+    stripMarkdownForNer("See https://example.com/周末whistler end") ===
+      "See end",
+    "stripMarkdownForNer removes URLs before CJK spacing, never splitting them"
   );
   const mdIn = [
     "# Hello [Bob Iger](https://en.wikipedia.org/wiki/Bob_Iger)",
@@ -1070,6 +1083,14 @@ async function runTests() {
     truncateAtWordBoundary("short", 100) === "short",
     "truncateAtWordBoundary leaves short text untouched"
   );
+  assert(
+    truncateAtWordBoundary("周末要去whistler滑雪", 8) === "周末要去",
+    "truncateAtWordBoundary backs off partial ASCII runs in spaceless text"
+  );
+  assert(
+    truncateAtWordBoundary("ab𠀋cd", 3) === "ab",
+    "truncateAtWordBoundary never splits a surrogate pair"
+  );
   const farSurfaces = [...surfaces];
   while (farSurfaces.length <= 40) farSurfaces.push("pad");
   farSurfaces[40] = "Ann";
@@ -1099,6 +1120,48 @@ async function runTests() {
       recoverSpanText(bradenSource, bradenProj, bradenSurfaces, bradenGroups[0].lo, bradenGroups[0].hi) === "Braden" &&
       recoverSpanText(bradenSource, bradenProj, bradenSurfaces, bradenGroups[1].lo, bradenGroups[1].hi) === "Braden",
     "groupNerWords splits same-type mentions joined by a real word"
+  );
+
+  // Subword fragments never stand alone: "Sol"+"dier" is one word, so the
+  // span recovers the full "Soldier Boy" — never a headless "dier Boy" —
+  // even when the model leaves the head piece untagged.
+  const soldierSurfaces = ["[CLS]", "Sol", "dier", "Boy", "[SEP]"];
+  const soldierSource = "I love Soldier Boy";
+  const soldierTokens = [
+    { entity: "B-PER", score: 0.9, index: 1, word: "Sol" },
+    { entity: "B-PER", score: 0.9, index: 2, word: "dier" },
+    { entity: "B-PER", score: 0.9, index: 3, word: "Boy" },
+  ];
+  const soldierGroups = groupNerWords(
+    nerWordRuns(soldierSurfaces, soldierTokens, soldierSource)
+  );
+  const soldierProj = projectTextAlnum(soldierSource);
+  const soldierSpan =
+    soldierGroups.length === 1
+      ? recoverSpanText(
+          soldierSource,
+          soldierProj,
+          soldierSurfaces,
+          soldierGroups[0].lo,
+          soldierGroups[0].hi
+        )
+      : null;
+  const noisyGroups = groupNerWords(
+    nerWordRuns(soldierSurfaces, soldierTokens.slice(1), soldierSource)
+  );
+  const noisySpan =
+    noisyGroups.length === 1
+      ? recoverSpanText(
+          soldierSource,
+          soldierProj,
+          soldierSurfaces,
+          noisyGroups[0].lo,
+          noisyGroups[0].hi
+        )
+      : null;
+  assert(
+    soldierSpan === "Soldier Boy" && noisySpan === "Soldier Boy",
+    "subword fragments fuse into the full name under clean and noisy tags"
   );
 
   // Bare conjunctions split; conjunctions inside comma-separated lists merge.
@@ -1497,6 +1560,30 @@ async function runTests() {
     daily[0].threadsBySource["AI Mode"] === 1 &&
       daily.every((d) => d.totalChats >= d.totalThreads),
     "buildDailyStats attributes threads to their earliest-chat source"
+  );
+  assert(
+    estimateTokens("abcdefgh") === 2 &&
+      estimateTokens("") === 0 &&
+      estimateTokens("周末") === 2 &&
+      estimateTokens("ab周末") === 3 &&
+      estimateTokens("2026年") === 2,
+    "estimateTokens counts CJK characters whole, ASCII at chars-per-4"
+  );
+  const staleItem = {
+    id: "stale",
+    fullMarkdown: "abcd周末",
+    allPromptsText: "hi",
+    condensedResponseText: "",
+    turns: [],
+    estimatedFullTokens: 0,
+    estimatedPackedTokens: 0,
+  } as unknown as ParsedActivityItem;
+  const refreshed = refreshTokenEstimates(staleItem);
+  assert(
+    refreshed.estimatedFullTokens === 3 &&
+      refreshed.estimatedPackedTokens === estimateTokens("hi\n") &&
+      refreshed.id === "stale",
+    "refreshTokenEstimates recomputes both estimates from stored text"
   );
 
   const threadItems = [
@@ -2341,6 +2428,7 @@ async function runTests() {
         scores: {
           productivity: 0.9,
           finance: 0,
+          business: 0,
           social: 0,
           entertainment: 0,
           health: 0,
@@ -2594,15 +2682,45 @@ async function runTests() {
     resumeQueue.map((q) => q.id).join(",") === "mid,old,undated",
     "buildProcessQueue skips chats whose stored record is current"
   );
+  // The Load page builds queues off the render path in chunks; the async
+  // builder must agree with the sync builders exactly, and stop on cancel.
+  const asyncQueues = await buildProcessQueuesAsync(
+    procItems,
+    {},
+    {},
+    null,
+    {}
+  );
+  assert(
+    JSON.stringify(asyncQueues.ner) ===
+      JSON.stringify(buildProcessQueue(procItems, {}, {}, null)) &&
+      JSON.stringify(asyncQueues.cats) ===
+        JSON.stringify(buildThreadCategoryQueue(procItems, {})),
+    "buildProcessQueuesAsync matches the sync queue builders"
+  );
+  const cancelledQueues = await buildProcessQueuesAsync(
+    procItems,
+    {},
+    {},
+    null,
+    {},
+    { chunk: 1, isCancelled: () => true }
+  );
+  assert(
+    cancelledQueues.ner.length === 0 && cancelledQueues.cats.length === 0,
+    "buildProcessQueuesAsync aborts early when cancelled"
+  );
 
   // === Category taxonomy ===
   assert(
-    CATEGORY_TAXONOMY.length === 8 &&
-      new Set(CATEGORY_TAXONOMY.map((c) => c.id)).size === 8 &&
-      CATEGORY_LABELS.length === 8 &&
+    CATEGORY_TAXONOMY.length === 9 &&
+      new Set(CATEGORY_TAXONOMY.map((c) => c.id)).size === 9 &&
+      CATEGORY_LABELS.length === 9 &&
       CATEGORY_LABELS.every((l) => !l.includes(" ")) &&
-      CATEGORY_TAXONOMY.every((c) => c.description.length > 0),
-    "taxonomy stores 8 one-word category labels with descriptions"
+      CATEGORY_TAXONOMY.every((c) => c.description.length > 0) &&
+      CATEGORY_LABELS.includes("business") &&
+      categoryLabelFor("business") === "Business",
+    "taxonomy stores 9 one-word category labels with descriptions"
   );
   const catScores = scoresToCategories({
     productivity: 0.9,
@@ -2619,6 +2737,34 @@ async function runTests() {
   assert(
     topCategory(scoresToCategories({})) === "productivity",
     "topCategory breaks all-zero ties by taxonomy order"
+  );
+  const bdThreads = summarizeThreads([
+    mkItem("bda", isoDaysAgo(0), "url-bd-1", "ChatGPT", "p"),
+    mkItem("bdb", isoDaysAgo(1), "url-bd-1", "ChatGPT", "p"),
+    mkItem("bdc", isoDaysAgo(0), "url-bd-2", "ChatGPT", "p"),
+  ]);
+  const bd = buildCategoryBreakdown(bdThreads, {
+    "url-bd-1": {
+      hash: "h",
+      version: THREAD_CATEGORY_VERSION,
+      scores: scoresToCategories({ productivity: 0.9 }),
+    },
+  });
+  const prod = bd.rows.find((r) => r.id === "productivity");
+  const unt = bd.rows.find((r) => r.id === "untagged");
+  assert(
+    prod !== undefined &&
+      prod.chats === 2 &&
+      prod.threads === 1 &&
+      prod.durationMs === 86400000 &&
+      unt !== undefined &&
+      unt.chats === 1 &&
+      unt.threads === 1 &&
+      unt.durationMs === 0 &&
+      bd.totalChats === 3 &&
+      bd.totalThreads === 2 &&
+      bd.totalDurationMs === 86400000,
+    "buildCategoryBreakdown shares chats/threads/duration, untagged reconciles"
   );
   const csItem: ParsedActivityItem = {
     ...procItem("cs", "2025-01-01T00:00:00Z"),
@@ -2677,6 +2823,7 @@ async function runTests() {
     scores: {
       productivity: 0,
       finance: 0,
+      business: 0,
       social: 0,
       entertainment: 0,
       health: 0,

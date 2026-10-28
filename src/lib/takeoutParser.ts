@@ -349,8 +349,65 @@ export function parseTurnsFromMarkdownAndTitle(
   return turns;
 }
 
+/**
+ * Rough token estimate: ASCII-ish text runs ~4 chars per token, but CJK
+ * characters (Han, Hiragana, Katakana, Hangul) cost ~1 token each, so the
+ * old chars/4 rule undercounted CJK-heavy histories by 2x or more. ASCII
+ * text is unaffected (no CJK match, identical arithmetic).
+ */
+const CJK_FOR_TOKENS =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
+
 export function estimateTokens(text: string): number {
-  return Math.ceil((text || "").length / 4);
+  const s = text || "";
+  const cjk = s.match(CJK_FOR_TOKENS)?.length ?? 0;
+  return Math.ceil(cjk + (s.length - cjk) / 4);
+}
+
+/**
+ * Recompute both token estimates from stored text, using the same inputs
+ * as parse time (full text for full, prompts plus condensed responses for
+ * packed). Falls back to rebuilding from turns when fullMarkdown is absent.
+ */
+export function refreshTokenEstimates(
+  item: ParsedActivityItem
+): ParsedActivityItem {
+  const full =
+    item.fullMarkdown ||
+    item.turns
+      .map(
+        (t) =>
+          `### Prompt\n${t.prompt}\n\n### Response\n${t.responseMarkdown || ""}`
+      )
+      .join("\n\n");
+  const packed = `${item.allPromptsText || ""}\n${item.condensedResponseText || ""}`;
+  return {
+    ...item,
+    estimatedFullTokens: estimateTokens(full),
+    estimatedPackedTokens: estimateTokens(packed),
+  };
+}
+
+const tokenEstimateFlagFor = (uuid: string): string =>
+  `sb_token_est_v2_${uuid}`;
+
+/**
+ * One-time backfill: stored chats keep the estimates computed at import,
+ * so a formula change never reaches history by itself. Runs once per
+ * dataset (flagged in localStorage), then returns inputs untouched.
+ */
+export function migrateTokenEstimates(
+  uuid: string,
+  items: ParsedActivityItem[]
+): ParsedActivityItem[] {
+  try {
+    if (localStorage.getItem(tokenEstimateFlagFor(uuid))) return items;
+    const next = items.map(refreshTokenEstimates);
+    localStorage.setItem(tokenEstimateFlagFor(uuid), "1");
+    return next;
+  } catch {
+    return items;
+  }
 }
 
 export function parseTakeoutJson(

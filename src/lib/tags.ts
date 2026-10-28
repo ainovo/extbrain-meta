@@ -113,3 +113,12 @@ export function formatEstimate(chatCount: number): string {
   const mins = Math.round(secs / 60);
   return `~${chatCount} chats · ~${mins} min`;
 }
+
+/**
+ * Display form of a tag name: "#name". Stored names stay bare (matching
+ * and thresholds key off them), so the prefix applies at render only, and
+ * names users already wrote with "#" are left alone.
+ */
+export function displayTagName(name: string): string {
+  return name.startsWith("#") ? name : `#${name}`;
+}

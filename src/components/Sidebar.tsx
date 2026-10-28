@@ -3,7 +3,7 @@ import { ExtBrainLogo } from "./ExtBrainLogo";
 import { ProcessJobSnapshot, processRunner } from "../lib/processRunner";
 import {
   Upload,
-  Tags,
+  Hash,
   MessagesSquare,
   FileText,
   Settings,
@@ -51,7 +51,7 @@ const ITEMS: Array<{ id: Exclude<SidebarView, "settings">; label: string; icon: 
   { id: "load", label: "Load", icon: Upload, hint: "Import Takeout JSON" },
   { id: "threads", label: "Threads", icon: MessagesSquare, hint: "Resume source threads" },
   { id: "chat", label: "Chats", icon: History, hint: "Browse chat histories" },
-  { id: "topics", label: "Tags", icon: Tags, hint: "Auto-tag chats" },
+  { id: "topics", label: "Tags", icon: Hash, hint: "Auto-tag chats" },
   { id: "summary", label: "Summaries", icon: FileText, hint: "Obsidian note" },
   { id: "actions", label: "Action Items", icon: ListChecks, hint: "Tasks from saved summaries" },
 ];

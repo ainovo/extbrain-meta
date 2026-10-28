@@ -7,8 +7,9 @@ import {
   Download,
   ChevronDown,
   MessagesSquare,
-  Tags,
+  Hash,
 } from "lucide-react";
+import { displayTagName } from "../lib/tags";
 import { PromptTemplate } from "../lib/types";
 import { toggleActionItemInMarkdown } from "../lib/actionItems";
 import {
@@ -156,8 +157,8 @@ const SummaryCard: React.FC<{
                 title={`View tag: ${t.name}`}
                 className="inline-flex items-center gap-1 rounded-full bg-tag px-2 py-0.5 text-[11px] font-medium text-mention hover:bg-divider transition"
               >
-                <Tags className="w-3 h-3 shrink-0" />
-                {t.name}
+                <Hash className="w-3 h-3 shrink-0" />
+                {displayTagName(t.name)}
               </button>
             ))}
           </div>

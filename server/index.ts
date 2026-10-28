@@ -177,11 +177,15 @@ let serverNerLoadingPromise: Promise<any> | null = null;
  * 16 = Davlan XLM-RoBERTa-base NER (quantized ONNX, markerless word runs,
  * BIO + DATE labels) replaces RoBERTa-large,
  * 17 = comma places merge only on known region codes ("Berkeley, CA"
- * stays whole; "Canada, UK" splits into two places)).
+ * stays whole; "Canada, UK" splits into two places),
+ * 18 = CJK/ASCII spacing isolated before NER ("周末要去 whistler 滑雪")
+ * so mixed-script blobs no longer fuse into one entity; every truncation
+ * backs off to a full word (spaceless text backs off ASCII runs, never
+ * splits surrogate pairs).
  * The Load page stores this per chat alongside its content hash and only
  * reprocesses chats whose record is missing, stale, or from an older version.
  */
-const NER_EXTRACTOR_VERSION = 17;
+const NER_EXTRACTOR_VERSION = 18;
 
 /**
  * Token-classification model for NER (extractor and tokenizer agree):

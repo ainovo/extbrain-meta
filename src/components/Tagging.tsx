@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Loader2, Play, Sparkles, Tag as TagIcon, X } from "lucide-react";
+import { ArrowRight, Hash, Loader2, Play, Sparkles, X } from "lucide-react";
 import { ModelEndpointConfig, ParsedActivityItem } from "../lib/types";
 import { buildEntryClassificationText } from "../lib/retrievalEngine";
 import {
   TagDef,
+  displayTagName,
   formatEstimate,
   inDateRange,
   newTagId,
@@ -359,7 +360,7 @@ export const Tagging: React.FC<TaggingProps> = ({
             <div className="mt-3 space-y-2 border-t border-dashed border-divider pt-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="text-sm font-semibold text-ink">
-                  {draft.name}
+                  {displayTagName(draft.name)}
                 </div>
                 <div className="text-xs text-mention shrink-0">
                   {formatEstimate(draftItems.length)}
@@ -475,9 +476,9 @@ export const Tagging: React.FC<TaggingProps> = ({
                     <X className="w-4 h-4" />
                   </button>
                   <div className="flex items-center gap-2 pr-6">
-                    <TagIcon className="w-4 h-4 text-mention/60 shrink-0" />
+                    <Hash className="w-4 h-4 text-mention/60 shrink-0" />
                     <div className="text-sm font-semibold text-ink truncate">
-                      {tag.name}
+                      {displayTagName(tag.name)}
                     </div>
                   </div>
                   <div className="mt-1 text-2xl font-bold tabular-nums text-ink">

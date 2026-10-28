@@ -1,9 +1,65 @@
 import { ChatEntityMap, normalizeEntityKey } from "./entities";
 import { ThreadSummary, threadKeyOf } from "./threads";
 import { ParsedActivityItem } from "./types";
+import { CategoryId, ThreadCategoryMap, topCategory } from "./categoryTags";
 
 export const TOP_OF_MIND_DAYS = 14;
 export const TOP_LIST_LIMIT = 5;
+/** Visible mentions per Top of Mind section (@ People, @ Places, @ Organizations). */
+export const MENTION_LIST_LIMIT = 10;
+
+export interface CategoryBreakdownRow {
+  id: CategoryId | "untagged";
+  chats: number;
+  threads: number;
+  durationMs: number;
+}
+
+export interface CategoryBreakdown {
+  rows: CategoryBreakdownRow[];
+  totalChats: number;
+  totalThreads: number;
+  totalDurationMs: number;
+}
+
+/**
+ * Per-category shares over an explicit thread list (usually the threads in
+ * the selected range). Verdicts come from the stored category map; threads
+ * without one bucket into "untagged" so the shares always reconcile.
+ * Duration is the sum of thread time spans (single-chat threads span
+ * zero and contribute nothing there, by construction).
+ */
+export function buildCategoryBreakdown(
+  threads: ThreadSummary[],
+  categoryMap: ThreadCategoryMap
+): CategoryBreakdown {
+  const byId = new Map<CategoryId | "untagged", CategoryBreakdownRow>();
+  const rowFor = (id: CategoryId | "untagged"): CategoryBreakdownRow => {
+    let row = byId.get(id);
+    if (!row) {
+      row = { id, chats: 0, threads: 0, durationMs: 0 };
+      byId.set(id, row);
+    }
+    return row;
+  };
+  let totalChats = 0;
+  let totalDurationMs = 0;
+  for (const t of threads) {
+    const rec = categoryMap[t.key];
+    const row = rowFor(rec ? topCategory(rec.scores) : "untagged");
+    row.chats += t.chats.length;
+    row.threads += 1;
+    row.durationMs += threadDurationMs(t);
+    totalChats += t.chats.length;
+    totalDurationMs += threadDurationMs(t);
+  }
+  return {
+    rows: [...byId.values()],
+    totalChats,
+    totalThreads: threads.length,
+    totalDurationMs,
+  };
+}
 
 export type ImportSource = "ChatGPT" | "Gemini" | "AI Mode" | "Obsidian" | "Other";
 

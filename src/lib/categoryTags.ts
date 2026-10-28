@@ -1,6 +1,6 @@
 /**
  * Fixed category taxonomy for thread classification. Each thread is scored
- * ONCE against the 8 one-word category names with the zero-shot NLI
+ * ONCE against the 9 one-word category names with the zero-shot NLI
  * endpoint ("This text is about {name}.") over its joined chat texts, and
  * takes the argmax category. One verdict per thread key persists per
  * dataset alongside entities; Top Threads reads it directly.
@@ -16,6 +16,7 @@ import { ParsedActivityItem } from "./types";
 export type CategoryId =
   | "productivity"
   | "finance"
+  | "business"
   | "social"
   | "entertainment"
   | "health"
@@ -41,6 +42,11 @@ export const CATEGORY_TAXONOMY: CategoryDef[] = [
     id: "finance",
     label: "Finance",
     description: "Banking, investing, and trading platforms.",
+  },
+  {
+    id: "business",
+    label: "Business",
+    description: "Startups, monetization, and product growth.",
   },
   {
     id: "social",
@@ -78,7 +84,7 @@ export const CATEGORY_TAXONOMY: CategoryDef[] = [
 export const CATEGORY_LABELS: string[] = CATEGORY_TAXONOMY.map((c) => c.id);
 
 /** Bump to invalidate stored verdicts (taxonomy or scorer change). */
-export const THREAD_CATEGORY_VERSION = 2;
+export const THREAD_CATEGORY_VERSION = 3;
 
 export type CategoryScores = Record<CategoryId, number>;
 
@@ -94,6 +100,7 @@ export type ThreadCategoryMap = Record<string, ThreadCategoryRecord>;
 const zeroScores = (): CategoryScores => ({
   productivity: 0,
   finance: 0,
+  business: 0,
   social: 0,
   entertainment: 0,
   health: 0,
@@ -160,9 +167,25 @@ export function topCategory(scores: CategoryScores): CategoryId {
  * head-truncated. Early chats set the topic, so truncation keeps the most
  * topical content.
  */
+/**
+ * Per-chat category scoring text cache: buildCategoryScoringText is pure in
+ * the item object, which the app keeps stable across navigations, so repeat
+ * scans reuse it instead of re-joining full responses. WeakMap: entries die
+ * with replaced items (imports/restores), so the cache can't go stale.
+ */
+const categoryTextCache = new WeakMap<ParsedActivityItem, string>();
+
+function cachedCategoryScoringText(item: ParsedActivityItem): string {
+  const cached = categoryTextCache.get(item);
+  if (cached !== undefined) return cached;
+  const text = buildCategoryScoringText(item);
+  categoryTextCache.set(item, text);
+  return text;
+}
+
 export function buildThreadScoringText(chats: ParsedActivityItem[]): string {
   return truncateAtWordBoundary(
-    chats.map((c) => buildCategoryScoringText(c)).join("\n\n"),
+    chats.map((c) => cachedCategoryScoringText(c)).join("\n\n"),
     800
   );
 }

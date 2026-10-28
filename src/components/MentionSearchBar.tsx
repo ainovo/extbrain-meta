@@ -1,28 +1,23 @@
 import React, { useMemo, useState } from "react";
 import { Search, X } from "lucide-react";
-import { ChatEntityMap, EntityAggregate, aggregateEntities, entityTypeLabel, filterMentionCandidates } from "../lib/entities";
+import { EntityAggregate, entityTypeLabel, filterMentionCandidates } from "../lib/entities";
 
 function MentionSearchBar({
-  entityMap,
+  candidates,
   hasEntities,
   onViewChats,
-  minScore = 0,
   initialKeys = [],
   noun = "threads",
 }: {
-  entityMap: ChatEntityMap;
+  /** Precomputed shared aggregation (App memoizes one per dataset+floor). */
+  candidates: EntityAggregate[];
   hasEntities: boolean;
   onViewChats: (keys: string[]) => void;
-  minScore?: number;
   /** Entity keys to pre-populate as pills (e.g. arriving from a pill click). */
   initialKeys?: string[];
   /** What a search returns on this page (placeholder wording). */
   noun?: string;
 }) {
-  const candidates = useMemo(
-    () => aggregateEntities(entityMap, 0, minScore),
-    [entityMap, minScore]
-  );
   const [query, setQuery] = useState("");
   const [picked, setPicked] = useState<EntityAggregate[]>(() =>
     initialKeys.flatMap((k) => {

@@ -8,6 +8,7 @@ import {
 import { normalizeModelConfig } from "./lib/exportData";
 import { buildSearchIndex, fuzzyFilterIndexed } from "./lib/fuzzySearch";
 import { getOrCreateUuid, saveHistories, loadHistories } from "./lib/storage";
+import { migrateTokenEstimates } from "./lib/takeoutParser";
 import { Sidebar, SidebarHamburger, SidebarView } from "./components/Sidebar";
 import { FileUploader } from "./components/FileUploader";
 import { HistoriesView } from "./components/HistoriesView";
@@ -16,6 +17,7 @@ import { EntityProcessSection } from "./components/EntityProcessSection";
 import { Tagging } from "./components/Tagging";
 import {
   ChatEntityMap,
+  aggregateEntities,
   loadChatEntities,
   saveChatEntities,
 } from "./lib/entities";
@@ -132,7 +134,7 @@ export const App: React.FC = () => {
         try {
           const parsed = JSON.parse(stored.itemsJson) as ParsedActivityItem[];
           if (Array.isArray(parsed) && parsed.length > 0) {
-            const sorted = [...parsed].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+            const sorted = [...migrateTokenEstimates(uuid, parsed)].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
             setItems(sorted);
             setHydrated(true);
             return;
@@ -171,8 +173,11 @@ export const App: React.FC = () => {
   }, [modelConfig]);
 
   const handleItemsLoaded = (newItems: ParsedActivityItem[], replace = false) => {
+    // Fresh imports already carry current estimates; restores may not, so
+    // both paths run the (flag-gated, one-time) backfill first.
+    const fresh = migrateTokenEstimates(uuid, newItems);
     setItems((prev) => {
-      const combined = replace ? newItems : [...prev, ...newItems];
+      const combined = replace ? fresh : [...prev, ...fresh];
       const map = new Map<string, ParsedActivityItem>();
       for (const it of combined) {
         const key = `${it.timestamp}|${it.cleanTitle}`;
@@ -185,6 +190,17 @@ export const App: React.FC = () => {
   };
 
   const taggingThreshold = modelConfig.zeroShotThreshold ?? DEFAULT_TAG_THRESHOLD;
+  const nerScoreFloor = modelConfig.nerScoreFloor ?? 0;
+
+  // Single shared mention aggregation for every view. Previously each menu
+  // navigation remounted its view and re-ran aggregateEntities (normalize +
+  // quadratic suffix fold over the whole map) inside MentionSearchBar,
+  // ThreadsView, SettingsView and EntityProcessSection — that recompute,
+  // not gzip, is what made every menu click stall.
+  const mentionCandidates = useMemo(
+    () => aggregateEntities(chatEntities, 0, nerScoreFloor),
+    [chatEntities, nerScoreFloor]
+  );
 
   useEffect(() => {
     if (skipPersistRef.current.tags) {
@@ -380,6 +396,7 @@ export const App: React.FC = () => {
             <TopOfMind
               items={items}
               entityMap={chatEntities}
+              mentionCandidates={mentionCandidates}
               categoryMap={threadCategories}
               minScore={modelConfig.nerScoreFloor ?? 0}
               uuid={uuid}
@@ -440,7 +457,7 @@ export const App: React.FC = () => {
                 uuid={uuid}
                 items={items}
                 entityMap={chatEntities}
-                minScore={modelConfig.nerScoreFloor ?? 0}
+                mentionCandidates={mentionCandidates}
                 minChats={modelConfig.mentionMinChats ?? 4}
                 onEntitiesChange={setChatEntities}
                 categoryMap={threadCategories}
@@ -455,7 +472,7 @@ export const App: React.FC = () => {
               items={visibleItems}
               totalCount={items.length}
               entityMap={chatEntities}
-              minScore={modelConfig.nerScoreFloor ?? 0}
+              mentionCandidates={mentionCandidates}
               onSelectEntities={(keys) => {
                 setQuery("");
                 setActiveTagIds([]);
@@ -502,6 +519,7 @@ export const App: React.FC = () => {
             <ThreadsView
               items={threadVisibleItems}
               entityMap={chatEntities}
+              mentionCandidates={mentionCandidates}
               minScore={modelConfig.nerScoreFloor ?? 0}
               onOpenThread={openThread}
               activeDateRange={activeDateRange}
@@ -567,6 +585,7 @@ export const App: React.FC = () => {
               config={modelConfig}
               onChange={setModelConfig}
               entityMap={chatEntities}
+              mentionCandidates={mentionCandidates}
             />
           )}
         </main>
