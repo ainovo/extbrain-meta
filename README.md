@@ -33,8 +33,9 @@ Technically, ExtBrain **is not a RAG** (Retrieval-Augmented Generation) system. 
 
 Instead of chunking text and using vector similarities to guess relevance, ExtBrain uses deterministic extraction and structuring:
 
-*   **Meta RoBERTa (On-Device):** Utilizes an on-device Meta NLI classifier to extract entities directly from raw messages. 
-*   **Cloud NER Option:** Provides an option to connect to cloud-based Named Entity Recognition (NER) services to expedite processing for massive chat repositories.
+*   **On-Device NER (XLM-R) [Meta-based]:** Davlan XLM-RoBERTa-base NER — fine-tuned from Meta's FacebookAI/xlm-roberta-base — runs locally via quantized ONNX to extract people, organizations, places, and dates directly from raw messages.
+*   **On-Device NLI Tagging (mDeBERTa):** A multilingual mDeBERTa (Microsoft-based) zero-shot classifier scores Smart Tags and thread categories locally.
+*   **Modal NER Option (planned):** Settings reserves a Modal-hosted GLiNER backend for massive chat repositories; it isn't wired up yet, so the local XLM-R model does the work.
 *   **Meta Muse Models:** Leverages Meta Muse models for highly accurate summarization and synthesis.
 *   **Bring-Your-Own-Key (BYOK):** Full flexibility to plug in your Meta model keys.
 
