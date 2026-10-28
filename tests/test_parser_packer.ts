@@ -23,8 +23,11 @@ import {
   countThreadsBySource,
   dataDayBounds,
   filterChatsByEntities,
+  filterChatsByTagsAndEntities,
   filterItemsByEntities,
   filterItemsByRange,
+  filterThreadItemsByTags,
+  filterThreadsByEntitiesAndTags,
   formatDayRangeLabel,
   formatDuration,
   retitleThreads,
@@ -41,8 +44,8 @@ import {
   stripTrailingUrlPunct,
 } from "../src/lib/urlPreview";
 import { summarizeThreads } from "../src/lib/threads";
-import { inDateRange, taggedChatIds, type TagDef } from "../src/lib/tags";
-import { MAX_ENTITY_NAME_CHARS, aggregateEntities, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, isCommonConnective, isPlausibleEntityName, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, stripJsonBlobs, stripMarkdownForNer, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
+import { inDateRange, taggedChatIds, tagVisibleIds, type TagDef } from "../src/lib/tags";
+import { MAX_ENTITY_NAME_CHARS, aggregateEntities, buildEntityKeyExpansion, chatNeedsProcessing, cleanEntityText, entityStorageInfo, entityTextHash, entityTypeLabel, entityTypeRank, filterMentionCandidates, groupNerWords, hasNameLetters, isCommonConnective, isPlausibleEntityName, loadChatEntities, loadChatEntityHashes, nerWordRuns, normalizeEntityKey, projectTextAlnum, recoverSpanText, saveChatEntities, stripJsonBlobs, stripMarkdownForNer, topEntitiesForChatIds, truncateAtWordBoundary, type ChatEntityMap } from "../src/lib/entities";
 import {
   buildEntryClassificationText,
   classifySingleTextZeroShot,
@@ -89,6 +92,7 @@ import {
 import {
   CATEGORY_LABELS,
   CATEGORY_TAXONOMY,
+  MAX_CUSTOM_CATEGORIES,
   THREAD_CATEGORY_VERSION,
   ThreadCategoryMap,
   CategoryId,
@@ -96,8 +100,14 @@ import {
   buildCategoryScoringText,
   buildThreadScoringText,
   categoryLabelFor,
+  displayLabelForCategoryId,
+  effectiveTaxonomy,
+  loadTaxonomyEdits,
   loadThreadCategories,
+  normalizeCategoryId,
+  normalizeTaxonomyEdits,
   normalizeThreadCategoryMap,
+  saveTaxonomyEdits,
   saveThreadCategories,
   scoresToCategories,
   threadNeedsCategoryScoring,
@@ -112,6 +122,7 @@ import {
   HISTORIES_CHUNK_SIZE,
   joinHistoriesChunks,
 } from "../src/lib/storage";
+import { fuzzyFilter } from "../src/lib/fuzzySearch";
 
 const FIXTURE_ENTRIES: RawTakeoutEntry[] = [
   {
@@ -383,6 +394,23 @@ async function runTests() {
     retagged.length === 1 && retagged[0] === "a",
     "Raising the threshold retags instantly from stored scores"
   );
+  const secondTag = {
+    ...tagFixture,
+    id: "tag2",
+    threshold: 0.9,
+    scores: {
+      b: { t: 0.95, c: 0 },
+      f: { t: 0.9, c: 0 },
+    },
+  };
+  const both = tagVisibleIds([tagFixture, secondTag], 0.4);
+  assert(
+    both.size === 1 &&
+      both.has("b") &&
+      tagVisibleIds([tagFixture], 0.4).size === 2 &&
+      tagVisibleIds([], 0.4).size === 0,
+    "tagVisibleIds intersects tags at each tag's own threshold override"
+  );
 
   const dated = [
     { id: "x", timestamp: "2026-09-19T01:24:35.383Z" },
@@ -519,6 +547,72 @@ async function runTests() {
   assert(
     aggregateEntities(bottonSplitMap, 0).length === 2,
     "suffix folding never merges across different entity types"
+  );
+  // A rare fused span must not swallow the common entity: "walmart" (3
+  // chats) keeps its own key instead of folding into the one-chat
+  // "amazon shopify walmart" blob, so picking the Walmart suggestion
+  // filters by "walmart" — not the blob key.
+  const blobMap: ChatEntityMap = {
+    w1: [{ name: "Walmart", type: "ORG" }],
+    w2: [{ name: "Walmart", type: "ORG" }],
+    w3: [{ name: "Walmart", type: "ORG" }],
+    b1: [{ name: "Amazon Shopify Walmart", type: "ORG" }],
+  };
+  const blobAgg = aggregateEntities(blobMap, 0);
+  assert(
+    blobAgg.length === 2 &&
+      blobAgg.some(
+        (a) =>
+          a.key === "walmart" &&
+          a.chatCount === 3 &&
+          a.altKeys.length === 0
+      ),
+    "suffix folding only merges into an equally-or-better evidenced longer span"
+  );
+  // Legit folds are remembered: surname-only "Boy" folds into the
+  // better evidenced "Soldier Boy", and searching either key finds all
+  // three chats through the expansion — without it only literal spans
+  // match.
+  const soldierMap: ChatEntityMap = {
+    s1: [{ name: "Soldier Boy", type: "PER" }],
+    s2: [{ name: "Soldier Boy", type: "PER" }],
+    s3: [{ name: "Boy", type: "PER" }],
+  };
+  const soldierAgg = aggregateEntities(soldierMap, 0);
+  const soldierItems = ["s1", "s2", "s3"].map(
+    (id) => ({ id }) as unknown as ParsedActivityItem
+  );
+  const soldierExpansion = buildEntityKeyExpansion(soldierAgg);
+  assert(
+    soldierAgg.length === 1 &&
+      soldierAgg[0].key === "soldier boy" &&
+      soldierAgg[0].chatCount === 3 &&
+      soldierAgg[0].altKeys.includes("boy") &&
+      filterChatsByEntities(soldierItems, soldierMap, ["soldier boy"], soldierExpansion).length === 3 &&
+      filterChatsByEntities(soldierItems, soldierMap, ["soldier boy"]).length === 2 &&
+      filterChatsByEntities(soldierItems, soldierMap, ["boy"], soldierExpansion).length === 3,
+    "folded variants are remembered as altKeys and search expands through them both ways"
+  );
+  // Badges and search share the score floor: with a 0.5 floor the
+  // low-confidence and unscored-legacy spans leave both the aggregate
+  // count and the filter results (2 chats); without a floor all four
+  // match. Otherwise badges promise 63 while search shows everything.
+  const floorMap: ChatEntityMap = {
+    g1: [{ name: "Walmart", type: "ORG", score: 0.9 }],
+    g2: [{ name: "Walmart", type: "ORG", score: 0.8 }],
+    g3: [{ name: "Walmart", type: "ORG", score: 0.1 }],
+    g4: [{ name: "Walmart", type: "ORG" }],
+  };
+  const floorItems = ["g1", "g2", "g3", "g4"].map(
+    (id) => ({ id }) as unknown as ParsedActivityItem
+  );
+  const floorAgg = aggregateEntities(floorMap, 0, 0.5);
+  assert(
+    floorAgg.length === 1 &&
+      floorAgg[0].chatCount === 2 &&
+      filterChatsByEntities(floorItems, floorMap, ["walmart"], undefined, 0.5).length === 2 &&
+      filterChatsByEntities(floorItems, floorMap, ["walmart"]).length === 4,
+    "entity search honors the same score floor as aggregation, unscored spans count as 0"
   );
   assert(
     stripMarkdownForNer("[Bob](http://x) and `code`") === "Bob and code" &&
@@ -1759,19 +1853,41 @@ async function runTests() {
       expanded.some((it) => it.id === "e4"),
     "filterItemsByEntities keeps whole hit threads plus keyless hits, drops the rest"
   );
+  // Thread-hit covers both picks across two chats (e1 names Alice, e2
+  // names Bob); thread-miss names only Bob and keyless e4 only Alice, so
+  // both drop under AND.
   const expMap2: ChatEntityMap = {
     ...expMap,
+    e2: [{ name: "Bob", type: "PER" }],
     e3: [{ name: "Bob", type: "PER" }],
   };
-  const expandedOr = filterItemsByEntities(expItems, expMap2, [
+  const expandedAnd = filterItemsByEntities(expItems, expMap2, [
     aliceKey,
     normalizeEntityKey("Bob"),
   ]);
   assert(
-    expandedOr.length === 4 &&
-      expandedOr.every((it) => it.id !== "e5") &&
+    expandedAnd.length === 2 &&
+      expandedAnd.some((it) => it.id === "e1") &&
+      expandedAnd.some((it) => it.id === "e2") &&
       filterItemsByEntities(expItems, expMap2, []).length === 0,
-    "filterItemsByEntities matches ANY of several entities and selects nothing for no keys"
+    "filterItemsByEntities requires EVERY entity per thread (picks may split across chats) and selects nothing for no keys"
+  );
+  // Chat-level AND is stricter: only a chat naming both itself survives.
+  const bothMap: ChatEntityMap = {
+    e1: [
+      { name: "Alice", type: "PER" },
+      { name: "Bob", type: "PER" },
+    ],
+    e3: [{ name: "Bob", type: "PER" }],
+    e4: [{ name: "Alice", type: "PER" }],
+  };
+  const chatAnd = filterChatsByEntities(expItems, bothMap, [
+    aliceKey,
+    normalizeEntityKey("Bob"),
+  ]);
+  assert(
+    chatAnd.length === 1 && chatAnd[0].id === "e1",
+    "filterChatsByEntities requires EVERY entity in the same chat"
   );
   // Chat-level mirror: e2 shares the hit thread but mentions nothing, so
   // the chats page drops it while keeping the direct hits.
@@ -1781,6 +1897,148 @@ async function runTests() {
       chatLevel.some((it) => it.id === "e1") &&
       chatLevel.some((it) => it.id === "e4"),
     "filterChatsByEntities keeps only chats that mention the entity"
+  );
+  // Combined facets: thread-hit qualifies (entity hit + tag hit, kept
+  // whole); thread-miss has an entity hit but no tag hit, so it drops;
+  // keyless chats must satisfy both.
+  const comboItems = [
+    mkItem("f1", isoDaysAgo(2), "thread-a", "ChatGPT", "alice here"),
+    mkItem("f2", isoDaysAgo(1), "thread-a", "ChatGPT", "no entity here"),
+    mkItem("f3", isoDaysAgo(0), "thread-b", "ChatGPT", "alice here"),
+    mkItem("f4", isoDaysAgo(0), undefined, "ChatGPT", "keyless alice"),
+    mkItem("f5", isoDaysAgo(0), undefined, "ChatGPT", "keyless nothing"),
+  ];
+  const comboMap: ChatEntityMap = {
+    f1: [{ name: "Alice", type: "PER" }],
+    f3: [{ name: "Alice", type: "PER" }],
+    f4: [{ name: "Alice", type: "PER" }],
+  };
+  const comboTag = {
+    ...tagFixture,
+    id: "tag-combo",
+    scores: {
+      f1: { t: 0.9, c: 0 },
+      f4: { t: 0.9, c: 0 },
+      f5: { t: 0.9, c: 0 },
+    },
+  };
+  const combo = filterThreadsByEntitiesAndTags(
+    comboItems,
+    comboMap,
+    [aliceKey],
+    [comboTag],
+    0.4
+  );
+  assert(
+    combo.length === 3 &&
+      combo.some((it) => it.id === "f1") &&
+      combo.some((it) => it.id === "f2") &&
+      combo.some((it) => it.id === "f4") &&
+      JSON.stringify(
+        filterThreadsByEntitiesAndTags(comboItems, comboMap, [aliceKey], [], 0.4).map(
+          (it) => it.id
+        )
+      ) ===
+        JSON.stringify(
+          filterItemsByEntities(comboItems, comboMap, [aliceKey]).map(
+            (it) => it.id
+          )
+        ),
+    "filterThreadsByEntitiesAndTags narrows hit threads to tag-visible ones, empty tags behave as before"
+  );
+  // Multi-tag thread AND: thread-a covers tag1 via f1 and tag2 via f2,
+  // so it stays whole; keyless f4 matches both tags itself; thread-b
+  // matches no tag2 chat and drops.
+  const comboTag2 = {
+    ...tagFixture,
+    id: "tag-combo-2",
+    scores: {
+      f2: { t: 0.9, c: 0 },
+      f4: { t: 0.9, c: 0 },
+    },
+  };
+  const combo2 = filterThreadsByEntitiesAndTags(
+    comboItems,
+    comboMap,
+    [aliceKey],
+    [comboTag, comboTag2],
+    0.4
+  );
+  assert(
+    combo2.length === 3 &&
+      combo2.some((it) => it.id === "f1") &&
+      combo2.some((it) => it.id === "f2") &&
+      combo2.some((it) => it.id === "f4"),
+    "filterThreadsByEntitiesAndTags requires EVERY tag per thread (tags may split across chats)"
+  );
+  // Single-thread review keeps sticky tag filters: the thread-A review
+  // shows only its tag-visible chat while the untagged rest stays hidden.
+  // With no tags the whole thread reviews, as entity search expects.
+  const threadA = comboItems.filter(
+    (it) => (it.threadUrl || it.titleUrl || null) === "thread-a"
+  );
+  const narrowed = filterThreadItemsByTags(threadA, [comboTag], 0.4);
+  assert(
+    narrowed.length === 1 &&
+      narrowed[0].id === "f1" &&
+      filterThreadItemsByTags(threadA, [], 0.4).length === threadA.length,
+    "filterThreadItemsByTags narrows a thread review to tag-visible chats, empty tags review whole"
+  );
+  // Chats-page conjunction: searching "alice" inside tag-filtered chats
+  // keeps f1 and f4 (tag-visible AND mentioning her), cutting f5 (no
+  // mention) and f3 (not tag-visible); dropping the entity keeps the tag
+  // set, dropping the tag keeps the entity set, dropping both keeps all.
+  const conj = filterChatsByTagsAndEntities(
+    comboItems,
+    [comboTag],
+    0.4,
+    comboMap,
+    [aliceKey]
+  );
+  assert(
+    conj.length === 2 &&
+      conj.some((it) => it.id === "f1") &&
+      conj.some((it) => it.id === "f4") &&
+      filterChatsByTagsAndEntities(comboItems, [comboTag], 0.4, comboMap, [])
+        .length === 3 &&
+      filterChatsByTagsAndEntities(comboItems, [], 0.4, comboMap, [aliceKey])
+        .length === 3 &&
+      filterChatsByTagsAndEntities(comboItems, [], 0.4, comboMap, []).length ===
+        comboItems.length,
+    "filterChatsByTagsAndEntities intersects tag and entity facets, either alone behaves as before"
+  );
+  // Multi-tag chat AND: only f4 matches both tags and the entity, so the
+  // chats page narrows to it alone.
+  const conj2 = filterChatsByTagsAndEntities(
+    comboItems,
+    [comboTag, comboTag2],
+    0.4,
+    comboMap,
+    [aliceKey]
+  );
+  assert(
+    conj2.length === 1 && conj2[0].id === "f4",
+    "filterChatsByTagsAndEntities requires EVERY tag in the same chat"
+  );
+  // Searching something known absent from the tag set narrows to nothing
+  // instead of leaving the tag-filtered list untouched: "bob" is
+  // mentioned only by f3 (outside the tag), "zzz" by nothing at all.
+  const bobMap: ChatEntityMap = {
+    f3: [{ name: "Bob", type: "PER" }],
+  };
+  const bobKey = normalizeEntityKey("Bob");
+  assert(
+    filterChatsByTagsAndEntities(comboItems, [comboTag], 0.4, bobMap, [
+      bobKey,
+    ]).length === 0 &&
+      filterChatsByTagsAndEntities(
+        comboItems,
+        [comboTag],
+        0.4,
+        comboMap,
+        [normalizeEntityKey("Zzz Nobody")]
+      ).length === 0,
+    "filterChatsByTagsAndEntities narrows to nothing when the entity is absent from the tag set"
   );
   // Both sides canonical: typed "Asif" finds stored "Asif's", any case.
   const possMap: ChatEntityMap = { e1: [{ name: "Asif's", type: "PER" }] };
@@ -1792,6 +2050,34 @@ async function runTests() {
         (it) => it.id === "e1"
       ),
     "entity search matches possessive and case variants"
+  );
+  // Text search AND: "shopify deco" keeps only the chat containing both
+  // tokens; single-token and blank queries behave as before.
+  const fz = (
+    id: string,
+    prompt: string,
+    response: string
+  ): ParsedActivityItem =>
+    ({
+      ...mkItem(id, isoDaysAgo(0), undefined, "ChatGPT", prompt),
+      allPromptsText: prompt,
+      condensedResponseText: response,
+      fullMarkdown: response,
+      cleanTitle: "",
+      extractedEntities: [],
+    }) as ParsedActivityItem;
+  const fzItems = [
+    fz("g1", "shopify store setup help", "modern art deco theme ideas"),
+    fz("g2", "shopify billing question", "pricing tiers explained"),
+    fz("g3", "art deco posters", "modern gallery prints"),
+  ];
+  const fzHits = fuzzyFilter(fzItems, "shopify deco");
+  assert(
+    fzHits.length === 1 &&
+      fzHits[0].id === "g1" &&
+      fuzzyFilter(fzItems, "shopify").length === 2 &&
+      fuzzyFilter(fzItems, "  ").length === 3,
+    "fuzzyFilter requires EVERY query token to match"
   );
   // Tiny token budget forces one batch per chat; the production budget
   // packs the same chats into a single small batch.
@@ -2438,6 +2724,7 @@ async function runTests() {
         },
       },
     },
+    taxonomy: { removed: [], added: [] },
     templates: [
       {
         id: "ct1",
@@ -2463,6 +2750,7 @@ async function runTests() {
       JSON.stringify(
         [
           "thread-categories.json",
+          "thread-taxonomy.json",
           "custom-templates.json",
           "entities.json",
           "histories.json",
@@ -2482,6 +2770,7 @@ async function runTests() {
       manifest.counts?.histories === 1 &&
       manifest.counts?.summaries === 1 &&
       manifest.counts?.categories === 1 &&
+      manifest.counts?.taxonomy === 9 &&
       Array.isArray(manifest.fileNames),
     "export manifest records the user, counts, and source files"
   );
@@ -2506,11 +2795,39 @@ async function runTests() {
       roundTrip.tags.length === 1 &&
       Object.keys(roundTrip.entities).length === 1 &&
       Object.keys(roundTrip.categories).length === 1 &&
+      roundTrip.taxonomy.removed.length === 0 &&
+      roundTrip.taxonomy.added.length === 0 &&
       roundTrip.templates.length === 1 &&
       roundTrip.modelConfig.discovery.provider === "meta" &&
       roundTrip.modelConfig.discovery.model === "muse-spark-1.3" &&
       roundTrip.modelConfig.synthesis.model === "muse-wonder-1.0",
     "parseExportZip round-trips every store"
+  );
+  const editedTaxonomy = await parseExportZip(
+    await buildExportZip({
+      ...exportFixture,
+      taxonomy: {
+        removed: ["social"],
+        added: [{ id: "crypto", label: "Crypto", description: "" }],
+      },
+    })
+  );
+  assert(
+    editedTaxonomy.taxonomy.removed.join(",") === "social" &&
+      editedTaxonomy.taxonomy.added.length === 1 &&
+      editedTaxonomy.taxonomy.added[0].id === "crypto",
+    "parseExportZip round-trips edited taxonomy"
+  );
+  const legacyZip = await JSZip.loadAsync(exportBlob);
+  legacyZip.remove("thread-taxonomy.json");
+  const legacyParsed = await parseExportZip(
+    await legacyZip.generateAsync({ type: "blob" })
+  );
+  assert(
+    legacyParsed.taxonomy.removed.length === 0 &&
+      legacyParsed.taxonomy.added.length === 0 &&
+      Object.keys(legacyParsed.categories).length === 1,
+    "parseExportZip defaults taxonomy for pre-taxonomy backups"
   );
   const junkParsed = await parseExportZip(
     await buildExportZip({
@@ -2887,6 +3204,155 @@ async function runTests() {
       loadThreadCategories("uc")["thread-a"]?.scores.finance === 0.7 &&
         Object.keys(loadThreadCategories("other")).length === 0,
       "thread verdicts persist per dataset"
+    );
+  } finally {
+    delete (globalThis as Record<string, unknown>).localStorage;
+  }
+  // === Editable taxonomy ===
+  assert(
+    normalizeCategoryId("Machine Learning") === "machine-learning" &&
+      normalizeCategoryId("#Gardening!") === "gardening" &&
+      normalizeCategoryId("untagged") === null &&
+      normalizeCategoryId("Untagged") === null &&
+      normalizeCategoryId("!!!") === null &&
+      (normalizeCategoryId("a".repeat(40))?.length ?? 99) <= 32 &&
+      displayLabelForCategoryId("machine-learning") === "Machine Learning",
+    "normalizeCategoryId slugs names, strips #, caps length, and reserves untagged"
+  );
+  const normEdits = normalizeTaxonomyEdits({
+    removed: ["social", "nope", "social"],
+    added: [
+      { id: "Crypto", label: "  ", description: "coins" },
+      { id: "finance", label: "Money", description: "redefine attempt" },
+      { id: "crypto", label: "dup", description: "" },
+      { id: "!!!", label: "bad", description: "" },
+    ],
+  });
+  assert(
+    normEdits.removed.join(",") === "social" &&
+      normEdits.added.length === 1 &&
+      normEdits.added[0].id === "crypto" &&
+      normEdits.added[0].label === "Crypto" &&
+      normEdits.added[0].description === "coins" &&
+      normalizeTaxonomyEdits(undefined).added.length === 0 &&
+      normalizeTaxonomyEdits({
+        added: Array.from({ length: 30 }, (_, i) => ({ id: `c${i}` })),
+      }).added.length === MAX_CUSTOM_CATEGORIES,
+    "normalizeTaxonomyEdits drops unknown removals, builtin redefines, dupes, and caps customs"
+  );
+  const effDefault = effectiveTaxonomy({ removed: [], added: [] });
+  const effEdited = effectiveTaxonomy({
+    removed: ["social"],
+    added: [{ id: "crypto", label: "Crypto", description: "" }],
+  });
+  const effEmptied = effectiveTaxonomy({
+    removed: CATEGORY_TAXONOMY.map((c) => c.id),
+    added: [],
+  });
+  assert(
+    effDefault.length === 9 &&
+      effEdited.length === 9 &&
+      !effEdited.some((c) => c.id === "social") &&
+      effEdited[effEdited.length - 1].id === "crypto" &&
+      effEmptied.length === 9,
+    "effectiveTaxonomy applies removals/adds and floors to built-ins when emptied"
+  );
+  const customTax = [
+    { id: "b", label: "B", description: "" },
+    { id: "a", label: "A", description: "" },
+  ];
+  assert(
+    topCategory({ a: 0.5, b: 0.5 }, customTax) === "b" &&
+      topCategory({ a: 0.9 }, customTax) === "a" &&
+      categoryLabelFor("crypto", effEdited) === "Crypto" &&
+      categoryLabelFor("missing", effEdited) === "missing",
+    "topCategory ties break by taxonomy order; labels resolve customs with id fallback"
+  );
+  const customScores = scoresToCategories({ crypto: 0.123456 }, [
+    { id: "crypto", label: "Crypto", description: "" },
+  ]);
+  assert(
+    customScores.crypto === 0.1235 &&
+      Object.keys(customScores).join(",") === "crypto",
+    "scoresToCategories writes dynamic ids and rounds to 4 decimals"
+  );
+  assert(
+    threadNeedsCategoryScoring({
+      entry: threadRec({}, "h"),
+      hash: "h",
+      taxonomyIds: [...CATEGORY_LABELS, "crypto"],
+    }) === true &&
+      threadNeedsCategoryScoring({
+        entry: threadRec({ crypto: 0.4 }, "h"),
+        hash: "h",
+        taxonomyIds: [...CATEGORY_LABELS, "crypto"],
+      }) === false &&
+      threadNeedsCategoryScoring({
+        entry: threadRec({ crypto: 0.4 }, "h"),
+        hash: "h",
+      }) === false,
+    "threadNeedsCategoryScoring refires on missing new-label scores, ignores extra keys"
+  );
+  const normKeep = normalizeThreadCategoryMap({
+    keep: {
+      hash: "h",
+      version: THREAD_CATEGORY_VERSION,
+      scores: { finance: 0.5, crypto: 0.7 },
+    },
+  });
+  assert(
+    normKeep.keep.scores.finance === 0.5 &&
+      normKeep.keep.scores.crypto === 0.7 &&
+      normKeep.keep.scores.social === 0,
+    "normalizeThreadCategoryMap preserves unknown-label scores for re-added labels"
+  );
+  const txHashFor = (key: string): string =>
+    entityTextHash(
+      buildThreadScoringText(
+        catThreadSums.find((t) => t.key === key)!.chats
+      )
+    );
+  const rescoreQueue = buildThreadCategoryQueue(
+    procItems,
+    { "thread-b": threadRec({}, txHashFor("thread-b")) },
+    [...CATEGORY_LABELS, "crypto"]
+  );
+  const removalQueue = buildThreadCategoryQueue(
+    procItems,
+    {
+      "thread-a": threadRec({}, txHashFor("thread-a")),
+      "thread-b": threadRec({}, txHashFor("thread-b")),
+    },
+    CATEGORY_LABELS.filter((l) => l !== "social")
+  );
+  assert(
+    rescoreQueue.map((q) => q.id).join(",") === "thread-b,thread-a" &&
+      removalQueue.length === 0,
+    "adding a label requeues current threads; removing one needs no rescore"
+  );
+  const taxStore = new Map<string, string>();
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: (k: string) => (taxStore.has(k) ? taxStore.get(k)! : null),
+    setItem: (k: string, v: string) => {
+      taxStore.set(k, String(v));
+    },
+    removeItem: (k: string) => {
+      taxStore.delete(k);
+    },
+  };
+  try {
+    saveTaxonomyEdits("ut", {
+      removed: ["social"],
+      added: [{ id: "crypto", label: "Crypto", description: "" }],
+    });
+    const loadedTax = loadTaxonomyEdits("ut");
+    assert(
+      loadedTax.removed.join(",") === "social" &&
+        loadedTax.added.length === 1 &&
+        loadedTax.added[0].id === "crypto" &&
+        loadTaxonomyEdits("other").added.length === 0 &&
+        loadTaxonomyEdits("other").removed.length === 0,
+      "taxonomy edits persist per dataset"
     );
   } finally {
     delete (globalThis as Record<string, unknown>).localStorage;

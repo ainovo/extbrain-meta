@@ -1,6 +1,7 @@
 import React, { useRef, useState } from "react";
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 import { ExtBrainLogo } from "./ExtBrainLogo";
+import { SectionHeader } from "./ui";
 import { ParsedActivityItem } from "../lib/types";
 import {
   detectJsonSource,
@@ -309,13 +310,11 @@ export const FileUploader: React.FC<Props> = ({
   const progressPct = jobs.length === 0 ? 0 : Math.round((doneCount / jobs.length) * 100);
 
   return (
-    <div>
-      <h2 className="text-lg sm:text-2xl font-bold tracking-tight text-ink leading-tight">
-        Load Chats
-      </h2>
-      <p className="text-[13px] text-mention mt-1 mb-4">
-        Pick a source below. Files are validated before loading and stay in your browser.
-      </p>
+    <section aria-label="Import chats" className="space-y-4">
+      <SectionHeader
+        title="Import chats"
+        sub="Pick a source below. Files are validated before loading and stay in your browser."
+      />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {SOURCES.map((source) => (
@@ -387,14 +386,14 @@ export const FileUploader: React.FC<Props> = ({
       </div>
 
       {backupError && (
-        <div className="mt-4 flex items-center gap-2 text-[13px]">
+        <div className="flex items-center gap-2 text-[13px]">
           <XCircle className="w-4 h-4 text-ink shrink-0" />
           <span className="text-ink truncate">{backupError}</span>
         </div>
       )}
 
       {backupPreview && (
-        <div className="mt-4 rounded-xl border border-divider bg-canvas px-4 py-3.5">
+        <div className="rounded-xl border border-divider bg-canvas px-4 py-3.5">
           <div className="text-[13px] font-semibold text-ink truncate">
             {backupPreview.fileName}
           </div>
@@ -436,7 +435,7 @@ export const FileUploader: React.FC<Props> = ({
       )}
 
       {restoredInfo && (
-        <div className="mt-4 flex items-center gap-2 text-[13px]">
+        <div className="flex items-center gap-2 text-[13px]">
           <CheckCircle2 className="w-4 h-4 text-ink shrink-0" />
           <span className="text-ink">
             Restored {restoredInfo.chats} chats and {restoredInfo.summaries}{" "}
@@ -446,7 +445,7 @@ export const FileUploader: React.FC<Props> = ({
       )}
 
       {jobs.length > 0 && (
-        <div className="mt-4">
+        <div>
           <div className="flex items-center justify-between text-[11px] text-mention mb-1.5">
             <span>
               Loading {doneCount}/{jobs.length} files{isLoading ? "…" : ""}
@@ -486,7 +485,6 @@ export const FileUploader: React.FC<Props> = ({
           </div>
         </div>
       )}
-
-    </div>
+    </section>
   );
 };

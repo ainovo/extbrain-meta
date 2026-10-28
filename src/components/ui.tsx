@@ -63,6 +63,27 @@ export function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Page-section header: uppercase label plus rule, with a description line. */
+export function SectionHeader({
+  title,
+  sub,
+}: {
+  title: string;
+  sub: React.ReactNode;
+}) {
+  return (
+    <div className="px-1">
+      <div className="flex items-center gap-1.5 pb-1">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-mention/60">
+          {title}
+        </h3>
+        <div className="flex-1 h-px bg-tag/70" />
+      </div>
+      <p className="text-[13px] text-mention mt-1">{sub}</p>
+    </div>
+  );
+}
+
 export function ToolButton({
   title,
   onClick,

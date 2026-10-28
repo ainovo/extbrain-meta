@@ -1,9 +1,14 @@
 /**
- * Fixed category taxonomy for thread classification. Each thread is scored
- * ONCE against the 9 one-word category names with the zero-shot NLI
- * endpoint ("This text is about {name}.") over its joined chat texts, and
- * takes the argmax category. One verdict per thread key persists per
- * dataset alongside entities; Top Threads reads it directly.
+ * Category taxonomy for thread classification. Each thread is scored ONCE
+ * against the one-word category names with the zero-shot NLI endpoint
+ * ("This text is about {name}.") over its joined chat texts, and takes the
+ * argmax category. One verdict per thread key persists per dataset
+ * alongside entities; Top Threads reads it directly.
+ *
+ * The 9 built-ins below are the default taxonomy; users can remove any of
+ * them and add their own on the Tags page (edits persist per dataset).
+ * Every scoring/display helper takes the taxonomy in force and defaults to
+ * the built-ins, so old verdicts and old backups keep working untouched.
  */
 import {
   decodeStoredJson,
@@ -13,16 +18,12 @@ import {
 import { truncateAtWordBoundary } from "./entities";
 import { ParsedActivityItem } from "./types";
 
-export type CategoryId =
-  | "productivity"
-  | "finance"
-  | "business"
-  | "social"
-  | "entertainment"
-  | "health"
-  | "travel"
-  | "utilities"
-  | "education";
+/**
+ * A category id: one of the 9 built-in ids below, or a user-added slug
+ * ("machine-learning"). Plain string: the taxonomy is user-editable, so no
+ * closed union can enumerate it.
+ */
+export type CategoryId = string;
 
 export interface CategoryDef {
   id: CategoryId;
@@ -80,13 +81,16 @@ export const CATEGORY_TAXONOMY: CategoryDef[] = [
   },
 ];
 
-/** Zero-shot candidate labels for /api/classify-batch (8 ids). */
+/**
+ * Zero-shot candidate labels for /api/classify-batch under the DEFAULT
+ * (unedited) taxonomy. Scoring runs pass the taxonomy in force instead.
+ */
 export const CATEGORY_LABELS: string[] = CATEGORY_TAXONOMY.map((c) => c.id);
 
 /** Bump to invalidate stored verdicts (taxonomy or scorer change). */
 export const THREAD_CATEGORY_VERSION = 3;
 
-export type CategoryScores = Record<CategoryId, number>;
+export type CategoryScores = Record<string, number>;
 
 /** Per-thread category verdict: content hash plus the full score map. */
 export interface ThreadCategoryRecord {
@@ -97,17 +101,11 @@ export interface ThreadCategoryRecord {
 
 export type ThreadCategoryMap = Record<string, ThreadCategoryRecord>;
 
-const zeroScores = (): CategoryScores => ({
-  productivity: 0,
-  finance: 0,
-  business: 0,
-  social: 0,
-  entertainment: 0,
-  health: 0,
-  travel: 0,
-  utilities: 0,
-  education: 0,
-});
+const zeroScores = (taxonomy: CategoryDef[]): CategoryScores => {
+  const out: CategoryScores = {};
+  for (const c of taxonomy) out[c.id] = 0;
+  return out;
+};
 
 /**
  * Zero-shot label scores (one call, multi-label) to per-category scores:
@@ -116,10 +114,11 @@ const zeroScores = (): CategoryScores => ({
  * stored bytes across 16K chats for no ranking benefit.
  */
 export function scoresToCategories(
-  labelScores: Record<string, number>
+  labelScores: Record<string, number>,
+  taxonomy: CategoryDef[] = CATEGORY_TAXONOMY
 ): CategoryScores {
-  const out = zeroScores();
-  for (const c of CATEGORY_TAXONOMY) {
+  const out = zeroScores(taxonomy);
+  for (const c of taxonomy) {
     out[c.id] = Math.round((labelScores[c.id] ?? 0) * 10000) / 10000;
   }
   return out;
@@ -149,10 +148,13 @@ export function buildCategoryScoringText(item: ParsedActivityItem): string {
 }
 
 /** The single most appropriate category (ties break by taxonomy order). */
-export function topCategory(scores: CategoryScores): CategoryId {
-  let best: CategoryId = CATEGORY_TAXONOMY[0].id;
+export function topCategory(
+  scores: CategoryScores,
+  taxonomy: CategoryDef[] = CATEGORY_TAXONOMY
+): CategoryId {
+  let best: CategoryId = taxonomy[0]?.id ?? "";
   let bestScore = -Infinity;
-  for (const c of CATEGORY_TAXONOMY) {
+  for (const c of taxonomy) {
     const s = scores[c.id] ?? 0;
     if (s > bestScore) {
       bestScore = s;
@@ -191,38 +193,47 @@ export function buildThreadScoringText(chats: ParsedActivityItem[]): string {
 }
 
 /** Display label for a category id ("productivity" → "Productivity"). */
-export function categoryLabelFor(id: CategoryId): string {
-  return CATEGORY_TAXONOMY.find((c) => c.id === id)?.label ?? id;
+export function categoryLabelFor(
+  id: CategoryId,
+  taxonomy: CategoryDef[] = CATEGORY_TAXONOMY
+): string {
+  return taxonomy.find((c) => c.id === id)?.label ?? id;
 }
 
 /**
  * True when a thread needs (re-)scoring: no verdict, changed text (new or
- * edited chats), or a verdict from before the current taxonomy/scorer
- * version.
+ * edited chats), a verdict from before the current taxonomy/scorer
+ * version, or a verdict missing any current label (scored before that
+ * label was added). Extra keys — labels since removed — are harmless:
+ * argmax only reads current ids, so removal needs no rescore, and
+ * re-adding a label reuses its still-valid score when the thread text is
+ * unchanged.
  */
 export function threadNeedsCategoryScoring(args: {
   entry: unknown;
   hash: string;
+  taxonomyIds?: string[];
 }): boolean {
   const rec = normalizeThreadCategoryRecord(args.entry);
   if (!rec) return true;
   if (rec.hash !== args.hash) return true;
   if (rec.version < THREAD_CATEGORY_VERSION) return true;
+  for (const id of args.taxonomyIds ?? CATEGORY_LABELS) {
+    if (typeof rec.scores[id] !== "number") return true;
+  }
   return false;
 }
 
-function isCategoryId(v: unknown): v is CategoryId {
-  return (
-    typeof v === "string" &&
-    (CATEGORY_TAXONOMY as Array<{ id: string }>).some((c) => c.id === v)
-  );
-}
-
-function normalizeScores(raw: unknown): CategoryScores | null {
+function normalizeScores(
+  raw: unknown,
+  taxonomy: CategoryDef[] = CATEGORY_TAXONOMY
+): CategoryScores | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const out = zeroScores();
+  const out = zeroScores(taxonomy);
+  // Unknown keys are kept, not dropped: scores for removed or custom
+  // labels stay valid across taxonomy edits (see threadNeedsCategoryScoring).
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (isCategoryId(k) && typeof v === "number" && Number.isFinite(v)) {
+    if (typeof v === "number" && Number.isFinite(v)) {
       out[k] = v;
     }
   }
@@ -276,6 +287,138 @@ export function saveThreadCategories(
   if (!ok) {
     console.error(
       `[extbrain] failed to persist ${payload.length} bytes of thread categories`
+    );
+  }
+  return ok;
+}
+
+/** Cap on user-added categories: zero-shot scores every label per thread. */
+export const MAX_CUSTOM_CATEGORIES = 16;
+
+/**
+ * Reserved id: the activity breakdown buckets verdict-less threads under
+ * "untagged", so no category may take that id.
+ */
+const RESERVED_CATEGORY_ID = "untagged";
+
+/**
+ * Normalize a user-typed category name to a scoring id ("Machine Learning"
+ * → "machine-learning"). Null when nothing usable remains or the id is
+ * reserved. Ids stay template-safe for "This text is about {id}.":
+ * lowercase alphanumerics plus dashes.
+ */
+export function normalizeCategoryId(raw: string): string | null {
+  const slug = raw
+    .trim()
+    .replace(/^#+/, "")
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .slice(0, 32)
+    .replace(/^-+|-+$/g, "");
+  if (!slug || slug === RESERVED_CATEGORY_ID) return null;
+  return slug;
+}
+
+/** Display label derived from an id ("machine-learning" → "Machine Learning"). */
+export function displayLabelForCategoryId(id: string): string {
+  return id
+    .split("-")
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+/** User edits to the built-in taxonomy, persisted per dataset. */
+export interface TaxonomyEdits {
+  /** Built-in ids the user removed. */
+  removed: string[];
+  /** User-added categories, in add order. */
+  added: CategoryDef[];
+}
+
+/** Validate stored or restored edits (localStorage and backups share this). */
+export function normalizeTaxonomyEdits(raw: unknown): TaxonomyEdits {
+  const builtinIds = new Set(CATEGORY_TAXONOMY.map((c) => c.id));
+  const empty: TaxonomyEdits = { removed: [], added: [] };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return empty;
+  const r = raw as { removed?: unknown; added?: unknown };
+  const removed: string[] = [];
+  if (Array.isArray(r.removed)) {
+    for (const v of r.removed) {
+      if (typeof v === "string" && builtinIds.has(v) && !removed.includes(v)) {
+        removed.push(v);
+      }
+    }
+  }
+  const added: CategoryDef[] = [];
+  const seen = new Set<string>();
+  if (Array.isArray(r.added)) {
+    for (const v of r.added) {
+      if (added.length >= MAX_CUSTOM_CATEGORIES) break;
+      if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+      const d = v as { id?: unknown; label?: unknown; description?: unknown };
+      const id = typeof d.id === "string" ? normalizeCategoryId(d.id) : null;
+      // Built-ins can only be removed/restored, never redefined.
+      if (!id || builtinIds.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      added.push({
+        id,
+        label:
+          typeof d.label === "string" && d.label.trim()
+            ? d.label.trim().slice(0, 64)
+            : displayLabelForCategoryId(id),
+        description:
+          typeof d.description === "string"
+            ? d.description.trim().slice(0, 280)
+            : "",
+      });
+    }
+  }
+  return { removed, added };
+}
+
+/**
+ * The taxonomy in force: built-ins minus removals, plus customs in add
+ * order. Floors to the built-ins when edits would leave nothing — scoring
+ * and argmax always have at least one label.
+ */
+export function effectiveTaxonomy(edits: TaxonomyEdits): CategoryDef[] {
+  const norm = normalizeTaxonomyEdits(edits);
+  const removed = new Set(norm.removed);
+  const out = CATEGORY_TAXONOMY.filter((c) => !removed.has(c.id));
+  const seen = new Set(out.map((c) => c.id));
+  for (const c of norm.added) {
+    if (!seen.has(c.id)) {
+      seen.add(c.id);
+      out.push(c);
+    }
+  }
+  return out.length > 0 ? out : [...CATEGORY_TAXONOMY];
+}
+
+const taxonomyKeyFor = (uuid: string) => `sb_taxonomy_${uuid}`;
+
+export function loadTaxonomyEdits(uuid: string): TaxonomyEdits {
+  try {
+    return normalizeTaxonomyEdits(
+      decodeStoredJson(localStorage.getItem(taxonomyKeyFor(uuid)))
+    );
+  } catch {
+    return { removed: [], added: [] };
+  }
+}
+
+export function saveTaxonomyEdits(
+  uuid: string,
+  edits: TaxonomyEdits
+): boolean {
+  const payload = encodeCompressedJson(normalizeTaxonomyEdits(edits));
+  const ok = setStoredItem(taxonomyKeyFor(uuid), payload);
+  if (!ok) {
+    console.error(
+      `[extbrain] failed to persist ${payload.length} bytes of taxonomy edits`
     );
   }
   return ok;

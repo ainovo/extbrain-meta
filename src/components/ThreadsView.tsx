@@ -5,6 +5,12 @@ import { MarkdownInline } from "./MarkdownView";
 import { summarizeThreads, ThreadSummary } from "../lib/threads";
 import { formatDayRangeLabel } from "../lib/topOfMind";
 import {
+  CategoryDef,
+  categoryLabelFor,
+  ThreadCategoryMap,
+  topCategory,
+} from "../lib/categoryTags";
+import {
   ChatEntityMap,
   EntityAggregate,
   topEntitiesForChatIds,
@@ -25,6 +31,10 @@ interface ThreadsViewProps {
   /** Entity filter owned by App (pre-applied to items, thread-expanded). */
   activeEntities: string[];
   onSelectEntities: (keys: string[]) => void;
+  /** Per-thread category verdicts; subtitle tag renders only when present. */
+  categoryMap?: ThreadCategoryMap;
+  /** Taxonomy in force for the subtitle tag. */
+  taxonomy: CategoryDef[];
 }
 
 function fmtDay(iso: string): string {
@@ -56,11 +66,15 @@ const ThreadRow = React.memo(function ThreadRow({
   entityMap,
   minScore,
   onOpenThread,
+  categoryMap,
+  taxonomy,
 }: {
   thread: ThreadSummary;
   entityMap: ChatEntityMap;
   minScore: number;
   onOpenThread: (key: string) => void;
+  categoryMap: ThreadCategoryMap;
+  taxonomy: CategoryDef[];
 }) {
   const topMentions = useMemo(
     () =>
@@ -76,6 +90,8 @@ const ThreadRow = React.memo(function ThreadRow({
     localDayKey(thread.startIso) === localDayKey(thread.endIso)
       ? fmtDay(thread.startIso)
       : `${fmtDay(thread.startIso)} → ${fmtDay(thread.endIso)}`;
+  const rec = categoryMap[thread.key];
+  const tag = rec ? topCategory(rec.scores, taxonomy) : null;
   return (
     <li>
       <div className="flex items-start gap-3 px-1 py-3 group">
@@ -88,9 +104,19 @@ const ThreadRow = React.memo(function ThreadRow({
           <div className="text-sm font-medium text-ink group-hover:underline underline-offset-2 line-clamp-2">
             <MarkdownInline markdown={thread.title} />
           </div>
-          <div className="text-[11px] text-mention mt-0.5">
-            {thread.count} {thread.count === 1 ? "chat" : "chats"} ·{" "}
-            {range}
+          <div className="text-[11px] text-mention mt-0.5 flex items-center gap-1.5">
+            <span>
+              {thread.count} {thread.count === 1 ? "chat" : "chats"} ·{" "}
+              {range}
+            </span>
+            {tag && (
+              <span
+                title={`Top category: ${categoryLabelFor(tag, taxonomy)}`}
+                className="rounded-md bg-tag px-1.5 py-0.5 text-[10px] font-medium text-mention"
+              >
+                #{tag}
+              </span>
+            )}
           </div>
           {topMentions.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mt-1.5">
@@ -124,6 +150,8 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
   minScore = 0,
   activeEntities,
   onSelectEntities,
+  categoryMap = {},
+  taxonomy,
 }) => {
   const [sort, setSort] = useState<SortMode>("chatted");
   const [renderCount, setRenderCount] = useState(PAGE_SIZE);
@@ -190,6 +218,28 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
           </p>
         </div>
         <div className="flex-1" />
+        {activeEntities.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {activeEntities.map((k) => {
+              const display =
+                mentionCandidates.find((c) => c.key === k)?.display ?? k;
+              return (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() =>
+                    onSelectEntities(activeEntities.filter((x) => x !== k))
+                  }
+                  title={`Remove ${display}`}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-mention px-3 py-1 text-xs font-medium text-white hover:bg-ink transition"
+                >
+                  <span className="max-w-48 truncate">{display}</span>
+                  <X className="w-3 h-3 opacity-70 shrink-0" />
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div
           className="flex items-center gap-0.5 rounded-full bg-tag p-0.5 shrink-0"
           role="group"
@@ -237,10 +287,20 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
 
       {(threads.length > 0 || activeEntities.length > 0) && (
         <MentionSearchBar
+          key={activeEntities.join("\n")}
           candidates={mentionCandidates}
           hasEntities={Boolean(Object.keys(entityMap).length)}
-          onViewChats={onSelectEntities}
-          initialKeys={activeEntities}
+          onViewChats={(keys) => {
+            // Additive: a search narrows on top of the header filters
+            // instead of replacing them; pills remove filters.
+            const merged = [...activeEntities];
+            for (const k of keys) {
+              if (!merged.includes(k)) merged.push(k);
+            }
+            onSelectEntities(merged);
+          }}
+          excludeKeys={activeEntities}
+          stagePicks
         />
       )}
 
@@ -262,6 +322,8 @@ export const ThreadsView: React.FC<ThreadsViewProps> = ({
               entityMap={entityMap}
               minScore={minScore}
               onOpenThread={onOpenThread}
+              categoryMap={categoryMap}
+              taxonomy={taxonomy}
             />
           ))}
          </ul>

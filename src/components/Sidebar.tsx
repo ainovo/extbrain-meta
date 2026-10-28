@@ -13,11 +13,11 @@ import {
   ChevronDown,
   Brain,
   ListChecks,
-  History,
   Square,
+  Archive,
 } from "lucide-react";
 
-export type SidebarView = "load" | "topics" | "summary" | "settings" | "chat" | "threads" | "top" | "actions";
+export type SidebarView = "load" | "topics" | "summary" | "settings" | "chat" | "threads" | "top" | "actions" | "archive";
 
 export interface DayEntry {
   key: string;
@@ -50,7 +50,7 @@ const ITEMS: Array<{ id: Exclude<SidebarView, "settings">; label: string; icon: 
   { id: "top", label: "Top of Mind", icon: Brain, hint: "Two-week overview" },
   { id: "load", label: "Load", icon: Upload, hint: "Import Takeout JSON" },
   { id: "threads", label: "Threads", icon: MessagesSquare, hint: "Resume source threads" },
-  { id: "chat", label: "Chats", icon: History, hint: "Browse chat histories" },
+  { id: "archive", label: "Archive", icon: Archive, hint: "All chats + entity search" },
   { id: "topics", label: "Tags", icon: Hash, hint: "Auto-tag chats" },
   { id: "summary", label: "Summaries", icon: FileText, hint: "Obsidian note" },
   { id: "actions", label: "Action Items", icon: ListChecks, hint: "Tasks from saved summaries" },

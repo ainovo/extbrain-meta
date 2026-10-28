@@ -25,6 +25,12 @@ export interface EntityAggregate {
   type: string;
   /** Number of distinct chats mentioning this entity. */
   chatCount: number;
+  /**
+   * Normalized member keys folded into this aggregate (never includes
+   * `key` itself). Search expands a picked key through these so folded
+   * variants ("boy" under "soldier boy") still match their chats.
+   */
+  altKeys: string[];
 }
 
 const keyFor = (uuid: string) => `sb_entities_${uuid}`;
@@ -507,9 +513,10 @@ interface EntityAccumulator {
  * share a dominant type, A's forms/types/chats merge into B. Parents
  * always have more words, so following parent pointers terminates.
  */
-function foldSuffixMentions(
-  acc: Map<string, EntityAccumulator>
-): Map<string, EntityAccumulator> {
+function foldSuffixMentions(acc: Map<string, EntityAccumulator>): {
+  merged: Map<string, EntityAccumulator>;
+  members: Map<string, string[]>;
+} {
   // Per-key fold inputs, computed once up front. Previously domType(),
   // mentions() and words() were recomputed for every (key, candidate)
   // pair, turning an O(K^2) scan into O(K^2) sorts, splits and reduces.
@@ -555,6 +562,11 @@ function foldSuffixMentions(
       }
       if (!match) continue;
       const bc = acc.get(cand)!;
+      // The "full name" must be at least as well-evidenced as the short
+      // form: otherwise a rare fused blob ("amazon shopify walmart", one
+      // chat) swallows the common entity ("walmart") and searching the
+      // suggestion filters by the wrong key.
+      if (bc.chats.size < acc.get(key)!.chats.size) continue;
       const bb = best === null ? null : acc.get(best)!;
       if (
         bb === null ||
@@ -576,6 +588,7 @@ function foldSuffixMentions(
     return r;
   };
   const merged = new Map<string, EntityAccumulator>();
+  const members = new Map<string, string[]>();
   for (const [key, a] of acc) {
     const root = rootOf(key);
     let m = merged.get(root);
@@ -583,11 +596,16 @@ function foldSuffixMentions(
       m = { forms: new Map(), types: new Map(), chats: new Set() };
       merged.set(root, m);
     }
+    if (key !== root) {
+      const list = members.get(root);
+      if (list) list.push(key);
+      else members.set(root, [key]);
+    }
     for (const [f, n] of a.forms) m.forms.set(f, (m.forms.get(f) || 0) + n);
     for (const [t, n] of a.types) m.types.set(t, (m.types.get(t) || 0) + n);
     for (const c of a.chats) m.chats.add(c);
   }
-  return merged;
+  return { merged, members };
 }
 
 export function aggregateEntities(
@@ -616,7 +634,7 @@ export function aggregateEntities(
       a.chats.add(chatId);
     }
   }
-  const merged = foldSuffixMentions(acc);
+  const { merged, members } = foldSuffixMentions(acc);
   const out: EntityAggregate[] = [];
   for (const [key, a] of merged) {
     if (a.chats.size <= minChats) continue;
@@ -624,11 +642,66 @@ export function aggregateEntities(
       [...a.forms.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? key;
     const type =
       [...a.types.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? "MISC";
-    out.push({ key, display, type, chatCount: a.chats.size });
+    out.push({
+      key,
+      display,
+      type,
+      chatCount: a.chats.size,
+      altKeys: members.get(key) ?? [],
+    });
   }
   return out.sort(
     (a, b) => b.chatCount - a.chatCount || a.display.localeCompare(b.display)
   );
+}
+
+/**
+ * Family index for picked mentions: every known key (fold roots and their
+ * members) maps to the full sibling set, so searching "soldier boy" also
+ * matches chats storing the folded variant "boy" — and typing the variant
+ * matches the root's chats too. Roots with no members are absent.
+ */
+export function buildEntityKeyExpansion(
+  aggregates: readonly EntityAggregate[]
+): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const a of aggregates) {
+    if (a.altKeys.length === 0) continue;
+    const family = [a.key, ...a.altKeys];
+    for (const k of family) map.set(k, family);
+  }
+  return map;
+}
+
+/** Wanted mention keys plus every folded sibling from the expansion. */
+export function expandEntityKeys(
+  keys: readonly string[],
+  expansion?: ReadonlyMap<string, readonly string[]>
+): Set<string> {
+  const out = new Set<string>();
+  for (const group of expandEntityKeyGroups(keys, expansion)) {
+    for (const m of group) out.add(m);
+  }
+  return out;
+}
+
+/**
+ * Per-pick mention families: one set per wanted key (itself plus every
+ * folded sibling from the expansion). Search intersects across groups, so
+ * picking "shopify" and "modern art deco" keeps only chats/threads
+ * mentioning BOTH — each pick matching any of its own variants.
+ */
+export function expandEntityKeyGroups(
+  keys: readonly string[],
+  expansion?: ReadonlyMap<string, readonly string[]>
+): Set<string>[] {
+  return keys.map((raw) => {
+    const k = normalizeEntityKey(raw);
+    const out = new Set<string>([k]);
+    const family = expansion?.get(k);
+    if (family) for (const m of family) out.add(m);
+    return out;
+  });
 }
 
 export function entityTypeLabel(t: string): string {

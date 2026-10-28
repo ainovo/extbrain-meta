@@ -23,6 +23,7 @@ import {
 } from "../lib/promptTemplates";
 import { ChatEntityMap, EntityAggregate } from "../lib/entities";
 import {
+  CategoryDef,
   ThreadCategoryMap,
   categoryLabelFor,
   topCategory,
@@ -814,6 +815,7 @@ function TopThreadsSection({
   hasEntities,
   onViewChats,
   categoryMap,
+  taxonomy,
 }: {
   threads: ThreadSummary[];
   onOpenThread: (key: string) => void;
@@ -822,6 +824,7 @@ function TopThreadsSection({
   hasEntities: boolean;
   onViewChats: (keys: string[]) => void;
   categoryMap: ThreadCategoryMap;
+  taxonomy: CategoryDef[];
 }) {
   const [mode, setMode] = usePersistentState<ThreadRankMode>(
     STORE_KEYS.threadRankMode,
@@ -854,7 +857,7 @@ function TopThreadsSection({
           <div className="mt-2 -mx-2 flex-1">
             {top.map((t) => {
               const rec = categoryMap[t.key];
-              const tag = rec ? topCategory(rec.scores) : null;
+              const tag = rec ? topCategory(rec.scores, taxonomy) : null;
               return (
                 <button
                   key={t.key}
@@ -868,7 +871,7 @@ function TopThreadsSection({
                   </span>
                   {tag && (
                     <span
-                      title={`Top category: ${categoryLabelFor(tag)}`}
+                      title={`Top category: ${categoryLabelFor(tag, taxonomy)}`}
                       className="shrink-0 rounded-md bg-tag px-1.5 py-0.5 text-[10px] font-medium text-mention"
                     >
                       #{tag}
@@ -889,6 +892,7 @@ function TopThreadsSection({
             candidates={mentionCandidates}
             hasEntities={hasEntities}
             onViewChats={onViewChats}
+            stagePicks
           />
         </div>
       </BlockPad>
@@ -1150,9 +1154,11 @@ type CategoryMetric = "duration" | "chats" | "threads";
 function CategoryStripe({
   threads,
   categoryMap,
+  taxonomy,
 }: {
   threads: ThreadSummary[];
   categoryMap: ThreadCategoryMap;
+  taxonomy: CategoryDef[];
 }) {
   const [metric, setMetric] = usePersistentState<CategoryMetric>(
     STORE_KEYS.categoryMetric,
@@ -1160,8 +1166,8 @@ function CategoryStripe({
     ["duration", "chats", "threads"]
   );
   const breakdown = useMemo(
-    () => buildCategoryBreakdown(threads, categoryMap),
-    [threads, categoryMap]
+    () => buildCategoryBreakdown(threads, categoryMap, taxonomy),
+    [threads, categoryMap, taxonomy]
   );
   if (threads.length === 0) return null;
   const total =
@@ -1248,6 +1254,7 @@ export const TopOfMind: React.FC<{
   /** Shared App-level aggregation for the mention search bar. */
   mentionCandidates: EntityAggregate[];
   categoryMap: ThreadCategoryMap;
+  taxonomy: CategoryDef[];
   uuid: string;
   onOpenThread: (key: string) => void;
   onViewChats: (keys: string[]) => void;
@@ -1262,6 +1269,7 @@ export const TopOfMind: React.FC<{
   items,
   entityMap,
   categoryMap,
+  taxonomy,
   uuid,
   onOpenThread,
   onViewChats,
@@ -1448,7 +1456,7 @@ export const TopOfMind: React.FC<{
         onOpenModelSettings={onOpenModelSettings}
       />
 
-      <CategoryStripe threads={threads} categoryMap={categoryMap} />
+      <CategoryStripe threads={threads} categoryMap={categoryMap} taxonomy={taxonomy} />
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <TopThreadsSection
@@ -1458,6 +1466,7 @@ export const TopOfMind: React.FC<{
           hasEntities={hasEntities}
           onViewChats={onViewChats}
           categoryMap={categoryMap}
+          taxonomy={taxonomy}
         />
         <ActionItemsSection
           uuid={uuid}

@@ -11,6 +11,8 @@ import {
 } from "./entities";
 import {
   CATEGORY_LABELS,
+  CATEGORY_TAXONOMY,
+  CategoryDef,
   THREAD_CATEGORY_VERSION,
   ThreadCategoryMap,
   buildThreadScoringText,
@@ -46,6 +48,8 @@ export interface ProcessStartArgs {
   baseHashes: ChatEntityHashMap;
   baseThreadCategories: ThreadCategoryMap;
   serverVersion: number | null;
+  /** Taxonomy in force for category scoring (defaults to the built-ins). */
+  taxonomy?: CategoryDef[];
   microBatch?: number;
   onBatch: (merged: ChatEntityMap, batchHashes: ChatEntityHashMap) => void;
   onCategories: (merged: ThreadCategoryMap) => void;
@@ -159,7 +163,8 @@ export function buildProcessQueue(
 /** Single-thread pending decision shared by the sync and async builders. */
 function categoryQueueEntryFor(
   t: ThreadSummary,
-  baseThreadCategories: ThreadCategoryMap
+  baseThreadCategories: ThreadCategoryMap,
+  taxonomyIds: string[]
 ): ProcessQueueItem | null {
   const text = buildThreadScoringText(t.chats);
   const hash = entityTextHash(text);
@@ -167,6 +172,7 @@ function categoryQueueEntryFor(
     !threadNeedsCategoryScoring({
       entry: baseThreadCategories[t.key],
       hash,
+      taxonomyIds,
     })
   ) {
     return null;
@@ -176,11 +182,12 @@ function categoryQueueEntryFor(
 
 export function buildThreadCategoryQueue(
   items: ParsedActivityItem[],
-  baseThreadCategories: ThreadCategoryMap
+  baseThreadCategories: ThreadCategoryMap,
+  taxonomyIds: string[] = CATEGORY_LABELS
 ): ProcessQueueItem[] {
   const queue: ProcessQueueItem[] = [];
   for (const t of summarizeThreads(items)) {
-    const entry = categoryQueueEntryFor(t, baseThreadCategories);
+    const entry = categoryQueueEntryFor(t, baseThreadCategories, taxonomyIds);
     if (entry) queue.push(entry);
   }
   return queue;
@@ -203,11 +210,12 @@ export async function buildProcessQueuesAsync(
   baseHashes: ChatEntityHashMap,
   serverVersion: number | null,
   baseThreadCategories: ThreadCategoryMap,
-  opts?: { chunk?: number; isCancelled?: () => boolean }
+  opts?: { chunk?: number; isCancelled?: () => boolean; taxonomyIds?: string[] }
 ): Promise<ProcessQueues> {
   const empty: ProcessQueues = { ner: [], cats: [] };
   const chunk = Math.max(1, opts?.chunk ?? 500);
   const isCancelled = opts?.isCancelled ?? (() => false);
+  const taxonomyIds = opts?.taxonomyIds ?? CATEGORY_LABELS;
   const nerQueue: QueuedChat[] = [];
   for (let i = 0; i < items.length; i += chunk) {
     if (isCancelled()) return empty;
@@ -231,7 +239,11 @@ export async function buildProcessQueuesAsync(
     if (isCancelled()) return empty;
     const end = Math.min(threads.length, i + chunk);
     for (let j = i; j < end; j++) {
-      const entry = categoryQueueEntryFor(threads[j], baseThreadCategories);
+      const entry = categoryQueueEntryFor(
+        threads[j],
+        baseThreadCategories,
+        taxonomyIds
+      );
       if (entry) cats.push(entry);
     }
     await tick();
@@ -309,9 +321,11 @@ class EntityProcessRunner {
     );
     // Thread verdicts are independent of NER: one scoring call per
     // thread, whatever its entity state.
+    const taxonomy = args.taxonomy ?? CATEGORY_TAXONOMY;
     const catQueue = buildThreadCategoryQueue(
       args.items,
-      args.baseThreadCategories
+      args.baseThreadCategories,
+      taxonomy.map((c) => c.id)
     );
     this.error = null;
     if (queue.length === 0 && catQueue.length === 0) {
@@ -327,7 +341,7 @@ class EntityProcessRunner {
     this.total = queue.length + catQueue.length;
     this.uuid = args.uuid;
     this.notify();
-    void this.loop(id, controller, args, queue, catQueue);
+    void this.loop(id, controller, args, queue, catQueue, taxonomy);
     return true;
   }
 
@@ -345,7 +359,8 @@ class EntityProcessRunner {
     controller: AbortController,
     args: ProcessStartArgs,
     queue: ProcessQueueItem[],
-    catQueue: ProcessQueueItem[]
+    catQueue: ProcessQueueItem[],
+    taxonomy: CategoryDef[]
   ): Promise<void> {
     const alive = () => id === this.runId && this.status === "running";
     const batchSize = args.microBatch ?? MICRO_BATCH;
@@ -411,8 +426,8 @@ class EntityProcessRunner {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             items: slice.map((s) => ({ id: s.id, text: s.text })),
-            labels: CATEGORY_LABELS,
-            // One category per thread: softmax the 8 labels, don't score
+            labels: taxonomy.map((c) => c.id),
+            // One category per thread: softmax the labels, don't score
             // each independently.
             multiLabel: false,
           }),
@@ -433,7 +448,7 @@ class EntityProcessRunner {
           cats[r.id] = {
             hash,
             version: THREAD_CATEGORY_VERSION,
-            scores: scoresToCategories(r.scores || {}),
+            scores: scoresToCategories(r.scores || {}, taxonomy),
           };
         }
         cats = { ...cats };

@@ -322,25 +322,35 @@ export const ThreadSummaryButton: React.FC<{ api: ThreadSummaryApi }> = ({
     generateWith,
     items,
   } = api;
+  // Dropdown alignment, decided on open: right-anchored by default, but
+  // left-anchored when the button sits too close to the left viewport
+  // edge for the w-80 menu to open leftward (wrapped mobile headers).
+  const [dropAlign, setDropAlign] = useState<"left" | "right">("right");
   return (
     <div ref={wrapRef} className="relative inline-block shrink-0">
       <button
         type="button"
         disabled={items.length === 0 || status === "generating"}
         onClick={() => {
+          if (!dropdownOpen && wrapRef.current) {
+            const r = wrapRef.current.getBoundingClientRect();
+            setDropAlign(r.right < 336 ? "left" : "right");
+          }
           setDropdownOpen((v) => !v);
         }}
         className="inline-flex items-center gap-1.5 rounded-lg bg-action px-3 py-1.5 text-xs font-medium text-white hover:bg-action-hover disabled:opacity-40 transition"
       >
         <Sparkles className="w-3.5 h-3.5" />
-        {status === "generating" ? "Summarizing…" : "Summarize"}
+        <span className="hidden sm:inline">
+          {status === "generating" ? "Summarizing…" : "Summarize"}
+        </span>
         <ChevronDown
           className={`w-3.5 h-3.5 transition-transform ${dropdownOpen ? "rotate-180" : ""}`}
         />
       </button>
 
       {dropdownOpen && (
-        <div className="absolute right-0 top-full mt-2 z-30 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-divider bg-canvas shadow-lg overflow-hidden">
+        <div className={`absolute top-full mt-2 z-30 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-divider bg-canvas shadow-lg overflow-hidden ${dropAlign === "left" ? "left-0" : "right-0"}`}>
               <div className="max-h-72 overflow-y-auto p-1.5 space-y-0.5">
                 {allTemplates.map((tpl) => {
                   const active = tpl.id === selectedTemplateId;

@@ -1,7 +1,19 @@
-import { ChatEntityMap, normalizeEntityKey } from "./entities";
+import { ChatEntityMap, expandEntityKeyGroups, normalizeEntityKey } from "./entities";
 import { ThreadSummary, threadKeyOf } from "./threads";
 import { ParsedActivityItem } from "./types";
-import { CategoryId, ThreadCategoryMap, topCategory } from "./categoryTags";
+import {
+  CATEGORY_TAXONOMY,
+  CategoryDef,
+  CategoryId,
+  ThreadCategoryMap,
+  topCategory,
+} from "./categoryTags";
+import {
+  TagDef,
+  effectiveTagThreshold,
+  taggedChatIds,
+  tagVisibleIds,
+} from "./tags";
 
 export const TOP_OF_MIND_DAYS = 14;
 export const TOP_LIST_LIMIT = 5;
@@ -31,7 +43,8 @@ export interface CategoryBreakdown {
  */
 export function buildCategoryBreakdown(
   threads: ThreadSummary[],
-  categoryMap: ThreadCategoryMap
+  categoryMap: ThreadCategoryMap,
+  taxonomy: CategoryDef[] = CATEGORY_TAXONOMY
 ): CategoryBreakdown {
   const byId = new Map<CategoryId | "untagged", CategoryBreakdownRow>();
   const rowFor = (id: CategoryId | "untagged"): CategoryBreakdownRow => {
@@ -46,7 +59,7 @@ export function buildCategoryBreakdown(
   let totalDurationMs = 0;
   for (const t of threads) {
     const rec = categoryMap[t.key];
-    const row = rowFor(rec ? topCategory(rec.scores) : "untagged");
+    const row = rowFor(rec ? topCategory(rec.scores, taxonomy) : "untagged");
     row.chats += t.chats.length;
     row.threads += 1;
     row.durationMs += threadDurationMs(t);
@@ -123,51 +136,193 @@ export function dataDayBounds(
   return { minKey, maxKey };
 }
 
-function chatMentionsAny(
+/**
+ * Canonical mention keys of one chat's spans passing the score floor.
+ * Same floor as aggregation (unscored legacy spans count as 0):
+ * otherwise badges hide low-confidence spans that search still matches,
+ * and the count never drops.
+ */
+function chatMentionKeys(
   entityMap: ChatEntityMap,
   chatId: string,
-  wanted: Set<string>
-): boolean {
-  return (entityMap[chatId] || []).some(
-    (e) =>
-      e && typeof e.name === "string" && wanted.has(normalizeEntityKey(e.name))
-  );
-}
-
-/** Chats mentioning ANY wanted entity (no thread expansion). */
-export function filterChatsByEntities(
-  items: ParsedActivityItem[],
-  entityMap: ChatEntityMap,
-  keys: string[]
-): ParsedActivityItem[] {
-  // Canonical on both sides: pill keys, typed text, and stored variants
-  // ("Asif's") all meet as one key.
-  const wanted = new Set(keys.map(normalizeEntityKey));
-  return items.filter((it) => chatMentionsAny(entityMap, it.id, wanted));
+  minScore = 0
+): Set<string> {
+  const out = new Set<string>();
+  for (const e of entityMap[chatId] || []) {
+    if (!e || typeof e.name !== "string") continue;
+    if ((typeof e.score === "number" ? e.score : 0) < minScore) continue;
+    out.add(normalizeEntityKey(e.name));
+  }
+  return out;
 }
 
 /**
- * Thread-expanding entity filter: keep every chat of each thread with at
- * least one chat mentioning any wanted entity, so results read as whole
- * conversations. Keyless chats mentioning one are kept directly — they
- * belong to no thread to expand.
+ * True when the mention set covers EVERY wanted group (AND across picks).
+ * Canonical on both sides: pill keys, typed text, and stored variants
+ * ("Asif's") all meet as one key; folded siblings ("boy" under
+ * "soldier boy") join through each pick's own group.
+ */
+function coversAllGroups(
+  mentioned: Set<string>,
+  groups: Set<string>[]
+): boolean {
+  return groups.every((g) => {
+    for (const k of g) {
+      if (mentioned.has(k)) return true;
+    }
+    return false;
+  });
+}
+
+/** Chats mentioning EVERY wanted entity (no thread expansion). */
+export function filterChatsByEntities(
+  items: ParsedActivityItem[],
+  entityMap: ChatEntityMap,
+  keys: string[],
+  keyExpansion?: ReadonlyMap<string, readonly string[]>,
+  minScore = 0
+): ParsedActivityItem[] {
+  const groups = expandEntityKeyGroups(keys, keyExpansion);
+  if (groups.length === 0) return [];
+  return items.filter((it) =>
+    coversAllGroups(chatMentionKeys(entityMap, it.id, minScore), groups)
+  );
+}
+
+/**
+ * Thread-expanding entity filter: keep every chat of each thread whose
+ * chats collectively mention EVERY wanted entity (the picks may land in
+ * different chats of the thread), so results read as whole conversations.
+ * Keyless chats must mention every entity themselves — they belong to no
+ * thread to expand.
  */
 export function filterItemsByEntities(
   items: ParsedActivityItem[],
   entityMap: ChatEntityMap,
-  keys: string[]
+  keys: string[],
+  keyExpansion?: ReadonlyMap<string, readonly string[]>,
+  minScore = 0
 ): ParsedActivityItem[] {
-  const wanted = new Set(keys.map(normalizeEntityKey));
-  const hitThreads = new Set<string>();
+  const groups = expandEntityKeyGroups(keys, keyExpansion);
+  if (groups.length === 0) return [];
+  const threadMentions = new Map<string, Set<string>>();
+  const keylessHit = new Set<string>();
   for (const it of items) {
-    if (!chatMentionsAny(entityMap, it.id, wanted)) continue;
+    const mentioned = chatMentionKeys(entityMap, it.id, minScore);
     const k = threadKeyOf(it);
-    if (k) hitThreads.add(k);
+    if (k) {
+      let acc = threadMentions.get(k);
+      if (!acc) {
+        acc = new Set<string>();
+        threadMentions.set(k, acc);
+      }
+      for (const m of mentioned) acc.add(m);
+    } else if (coversAllGroups(mentioned, groups)) {
+      keylessHit.add(it.id);
+    }
+  }
+  const hitThreads = new Set<string>();
+  for (const [k, mentioned] of threadMentions) {
+    if (coversAllGroups(mentioned, groups)) hitThreads.add(k);
   }
   return items.filter((it) => {
     const k = threadKeyOf(it);
-    return k ? hitThreads.has(k) : chatMentionsAny(entityMap, it.id, wanted);
+    return k ? hitThreads.has(k) : keylessHit.has(it.id);
   });
+}
+
+/**
+ * Threads-view combination of entity search with tag filters: whole
+ * entity-hit threads are kept only when the thread also covers EVERY tag
+ * (each tag matched by at least one of its chats); keyless chats must
+ * satisfy both facets themselves. With no tags this behaves exactly like
+ * filterItemsByEntities.
+ */
+export function filterThreadsByEntitiesAndTags(
+  items: ParsedActivityItem[],
+  entityMap: ChatEntityMap,
+  keys: string[],
+  tags: TagDef[],
+  threshold: number,
+  keyExpansion?: ReadonlyMap<string, readonly string[]>,
+  minScore = 0
+): ParsedActivityItem[] {
+  const expanded = filterItemsByEntities(
+    items,
+    entityMap,
+    keys,
+    keyExpansion,
+    minScore
+  );
+  if (tags.length === 0) return expanded;
+  const perTagVisible = tags.map(
+    (t) => new Set(taggedChatIds(t, effectiveTagThreshold(t, threshold)))
+  );
+  const threadChats = new Map<string, ParsedActivityItem[]>();
+  for (const it of items) {
+    const k = threadKeyOf(it);
+    if (!k) continue;
+    const list = threadChats.get(k);
+    if (list) list.push(it);
+    else threadChats.set(k, [it]);
+  }
+  const tagHitThreads = new Set<string>();
+  for (const [k, chats] of threadChats) {
+    if (
+      perTagVisible.every((visible) => chats.some((c) => visible.has(c.id)))
+    ) {
+      tagHitThreads.add(k);
+    }
+  }
+  const visibleAll = tagVisibleIds(tags, threshold);
+  return expanded.filter((it) => {
+    const k = threadKeyOf(it);
+    return k ? tagHitThreads.has(k) : visibleAll.has(it.id);
+  });
+}
+
+/**
+ * Chats-page conjunction of the sticky tag facet with entity search: a
+ * chat shows when it matches EVERY active tag (if any) AND mentions EVERY
+ * wanted entity (if any is searched), so searching narrows tag-filtered
+ * chats instead of replacing the filter. Either facet alone behaves as
+ * before; with neither, every chat passes.
+ */
+export function filterChatsByTagsAndEntities(
+  items: ParsedActivityItem[],
+  tags: TagDef[],
+  threshold: number,
+  entityMap: ChatEntityMap,
+  keys: string[],
+  keyExpansion?: ReadonlyMap<string, readonly string[]>,
+  minScore = 0
+): ParsedActivityItem[] {
+  let list = items;
+  if (tags.length > 0) {
+    const visible = tagVisibleIds(tags, threshold);
+    list = list.filter((it) => visible.has(it.id));
+  }
+  if (keys.length > 0) {
+    list = filterChatsByEntities(list, entityMap, keys, keyExpansion, minScore);
+  }
+  return list;
+}
+
+/**
+ * Single-thread review keeps sticky tag filters: entity, text, and date
+ * facets are bypassed there (a thread always reviews whole for those),
+ * but tag filters persist across menu navigation, so dropping them the
+ * moment a thread opens reads as "view filtered chats shows everything".
+ * With no tags the whole thread reviews.
+ */
+export function filterThreadItemsByTags(
+  threadItems: ParsedActivityItem[],
+  tags: TagDef[],
+  threshold: number
+): ParsedActivityItem[] {
+  if (tags.length === 0) return threadItems;
+  const visible = tagVisibleIds(tags, threshold);
+  return threadItems.filter((it) => visible.has(it.id));
 }
 
 /** Chats whose local day falls inside [startKey, endKey] (inclusive). */

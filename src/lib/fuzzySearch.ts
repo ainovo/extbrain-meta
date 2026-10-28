@@ -1,5 +1,5 @@
-// Fast fuzzy-ish search with soft OR-matching: every query token contributes
-// its best match score, so multi-word queries rank instead of returning nothing.
+// Fast fuzzy-ish search with AND-matching: every query token must match
+// somewhere, and the survivors rank by summed best-match scores.
 import { ParsedActivityItem } from "./types";
 
 function normalize(s: string): string {
@@ -105,10 +105,12 @@ export function scoreIndexed(
   }
 
   for (const tok of queryTokens) {
-    score += tokenScore(tok, idx);
+    const s = tokenScore(tok, idx);
+    // AND: a single unmatched token filters the chat out.
+    if (s <= 0) return 0;
+    score += s;
   }
 
-  // Small completeness bonus when every token matched somewhere.
   return score;
 }
 

@@ -18,12 +18,17 @@ import { Tagging } from "./components/Tagging";
 import {
   ChatEntityMap,
   aggregateEntities,
+  buildEntityKeyExpansion,
   loadChatEntities,
   saveChatEntities,
 } from "./lib/entities";
 import {
+  TaxonomyEdits,
   ThreadCategoryMap,
+  effectiveTaxonomy,
+  loadTaxonomyEdits,
   loadThreadCategories,
+  saveTaxonomyEdits,
   saveThreadCategories,
 } from "./lib/categoryTags";
 import { SummaryGenerator } from "./components/SummaryGenerator";
@@ -34,14 +39,17 @@ import {
   effectiveTagThreshold,
   loadTags,
   saveTags,
-  taggedChatIds,
 } from "./lib/tags";
 import { SettingsView } from "./components/SettingsView";
 import {
+  dataDayBounds,
   filterChatsByEntities,
-  filterItemsByEntities,
+  filterChatsByTagsAndEntities,
   filterItemsByRange,
+  filterThreadItemsByTags,
+  filterThreadsByEntitiesAndTags,
 } from "./lib/topOfMind";
+import { DateRangePicker } from "./components/DateRangePicker";
 import { TopOfMind } from "./components/TopOfMind";
 import { UrlPreviewLayer } from "./components/UrlPreviewLayer";
 
@@ -67,6 +75,12 @@ function localDayKey(iso: string): string {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
+
+// Archive page props that never change: no sidebar day sync, no tag facet.
+const ARCHIVE_SCROLL_TARGET = { day: null as string | null, nonce: 0 };
+const noopDayChange = (_day: string) => {};
+const noopTagToggle = (_id: string) => {};
+const noopThresholdChange = (_id: string, _v: number) => {};
 
 function formatDayLabel(dayKey: string): string {
   if (dayKey === "Unknown date") return dayKey;
@@ -95,7 +109,16 @@ export const App: React.FC = () => {
   const [tags, setTags] = useState<TagDef[]>(() => loadTags(uuid));
   const [chatEntities, setChatEntities] = useState<ChatEntityMap>(() => loadChatEntities(uuid));
   const [threadCategories, setThreadCategories] = useState<ThreadCategoryMap>(() => loadThreadCategories(uuid));
+  const [taxonomyEdits, setTaxonomyEdits] = useState<TaxonomyEdits>(() => loadTaxonomyEdits(uuid));
+  const taxonomy = useMemo(() => effectiveTaxonomy(taxonomyEdits), [taxonomyEdits]);
   const [activeEntities, setActiveEntities] = useState<string[]>([]);
+  // Archive page owns its entity filters separately from the Chats page
+  // facets, so the two never interact.
+  const [archiveEntities, setArchiveEntities] = useState<string[]>([]);
+  const [archiveDateRange, setArchiveDateRange] = useState<{
+    start: string;
+    end: string;
+  } | null>(null);
   const [activeDateRange, setActiveDateRange] = useState<{
     start: string;
     end: string;
@@ -150,7 +173,7 @@ export const App: React.FC = () => {
   // A restore writes storage itself; each echo re-persist is skipped once
   // so restored bytes (and file names) survive untouched. Model config is
   // excluded: restore never writes it, so its effect must persist the merge.
-  const skipPersistRef = useRef({ items: false, tags: false, entities: false, categories: false });
+  const skipPersistRef = useRef({ items: false, tags: false, entities: false, categories: false, taxonomy: false });
   // Persist on change (debounced by effect)
   useEffect(() => {
     if (!hydrated) return;
@@ -202,6 +225,14 @@ export const App: React.FC = () => {
     [chatEntities, nerScoreFloor]
   );
 
+  // Folded-variant index for search: a picked aggregate key also matches
+  // the member keys folded into it, so the filter finds every chat the
+  // suggestion count promised.
+  const entityKeyExpansion = useMemo(
+    () => buildEntityKeyExpansion(mentionCandidates),
+    [mentionCandidates]
+  );
+
   useEffect(() => {
     if (skipPersistRef.current.tags) {
       skipPersistRef.current.tags = false;
@@ -226,6 +257,14 @@ export const App: React.FC = () => {
     saveThreadCategories(uuid, threadCategories);
   }, [threadCategories, uuid]);
 
+  useEffect(() => {
+    if (skipPersistRef.current.taxonomy) {
+      skipPersistRef.current.taxonomy = false;
+      return;
+    }
+    saveTaxonomyEdits(uuid, taxonomyEdits);
+  }, [taxonomyEdits, uuid]);
+
   // Search index builds only while a query is active (it lowercases the
   // full corpus, so building it on every load blocks restore/import); the
   // boolean dep keeps keystrokes from rebuilding it.
@@ -245,10 +284,12 @@ export const App: React.FC = () => {
     [tags, activeTagIds]
   );
 
-  // A chat shows if it matches ANY active tag or ANY active entity; tag,
-  // entity and text filters are mutually exclusive, activating one clears
-  // the others. Each tag uses its own threshold override, falling back to
-  // the global one. The thread filter applies on top so sidebar days stay
+  // Facet filters combine: a chat shows if it matches EVERY active tag
+  // AND EVERY active entity, so searching narrows tag-filtered chats
+  // instead of replacing the filter. Each tag uses its own threshold
+  // override, falling back to the global one. Text search intersects
+  // whatever the facets select (relevance order only when searching the
+  // whole corpus). The thread filter applies on top so sidebar days stay
   // aligned with the thread-filtered chats.
   const baseVisibleItems = useMemo(() => {
     if (activeDateRange) {
@@ -258,34 +299,77 @@ export const App: React.FC = () => {
         activeDateRange.end
       );
     }
-    if (activeEntities.length > 0) {
-      return filterChatsByEntities(items, chatEntities, activeEntities);
-    }
-    if (activeTags.length > 0) {
-      const ids = new Set<string>();
-      for (const tag of activeTags) {
-        for (const id of taggedChatIds(tag, effectiveTagThreshold(tag, taggingThreshold))) ids.add(id);
-      }
-      return items.filter((it) => ids.has(it.id));
-    }
-    return query.trim() ? fuzzyFilterIndexed(indexed, query) : items;
-  }, [indexed, items, query, activeTags, activeEntities, activeDateRange, chatEntities, taggingThreshold]);
+    const list = filterChatsByTagsAndEntities(
+      items,
+      activeTags,
+      taggingThreshold,
+      chatEntities,
+      activeEntities,
+      entityKeyExpansion,
+      nerScoreFloor
+    );
+    if (!query.trim()) return list;
+    if (list === items) return fuzzyFilterIndexed(indexed, query);
+    const hitIds = new Set(
+      fuzzyFilterIndexed(indexed, query).map((it) => it.id)
+    );
+    return list.filter((it) => hitIds.has(it.id));
+  }, [indexed, items, query, activeTags, activeEntities, activeDateRange, chatEntities, taggingThreshold, entityKeyExpansion, nerScoreFloor]);
 
   const visibleItems = useMemo(() => {
     if (!focusedThread) return baseVisibleItems;
-    return baseVisibleItems.filter(
+    const inThread = items.filter(
       (it) => (it.threadUrl || it.titleUrl || null) === focusedThread
     );
-  }, [baseVisibleItems, focusedThread]);
+    // Reviewing one thread bypasses entity, text, and date facets (they
+    // stay active behind the view; stepping back out restores them), but
+    // sticky tag filters still narrow the thread — dropping them here made
+    // "view filtered chats" show every chat once a thread was opened.
+    return filterThreadItemsByTags(inThread, activeTags, taggingThreshold);
+  }, [items, focusedThread, activeTags, taggingThreshold]);
 
   // Threads page: same filters, but entity matches expand to whole threads
-  // (date range keeps precedence, as in baseVisibleItems).
+  // (date range keeps precedence, as in baseVisibleItems). Tag filters
+  // narrow the expansion: a hit thread shows only with a tag-visible chat.
   const threadVisibleItems = useMemo(() => {
     if (activeEntities.length > 0 && !activeDateRange) {
-      return filterItemsByEntities(items, chatEntities, activeEntities);
+      return filterThreadsByEntitiesAndTags(
+        items,
+        chatEntities,
+        activeEntities,
+        activeTags,
+        taggingThreshold,
+        entityKeyExpansion,
+        nerScoreFloor
+      );
     }
     return baseVisibleItems;
-  }, [items, chatEntities, activeEntities, activeDateRange, baseVisibleItems]);
+  }, [items, chatEntities, activeEntities, activeTags, activeDateRange, baseVisibleItems, taggingThreshold, entityKeyExpansion, nerScoreFloor]);
+
+  // Archive page: every chat narrowed by its own entity search AND
+  // date range (no tags/threads involved).
+  const archiveVisibleItems = useMemo(() => {
+    let list = items;
+    if (archiveEntities.length > 0) {
+      list = filterChatsByEntities(
+        list,
+        chatEntities,
+        archiveEntities,
+        entityKeyExpansion,
+        nerScoreFloor
+      );
+    }
+    if (archiveDateRange) {
+      list = filterItemsByRange(
+        list,
+        archiveDateRange.start,
+        archiveDateRange.end
+      );
+    }
+    return list;
+  }, [items, chatEntities, archiveEntities, archiveDateRange, entityKeyExpansion, nerScoreFloor]);
+
+  const archiveBounds = useMemo(() => dataDayBounds(items), [items]);
 
   const focusedThreadTitle = useMemo(() => {
     if (!focusedThread) return null;
@@ -346,16 +430,35 @@ export const App: React.FC = () => {
   }, [tags]);
 
   const navigate = (v: SidebarView) => {
-    // Entering the Threads list always shows every thread; entering Chats
-    // from the menu always shows every chat. The thread filter only
-    // applies within the Chat Histories view once opened from a thread.
-    if (v === "threads" || v === "chat") setFocusedThread(null);
+    // Entering the Threads list always shows every thread. Chats is no
+    // longer in the menu (the page stays for thread display); entering it
+    // programmatically still shows the default view: every chat, every
+    // filter cleared. The thread filter only applies within the Chat
+    // Histories view once opened from a thread. Entity search belongs to
+    // the page where it ran: switching menus resets it (otherwise search
+    // pills leak into the Threads search box). Tag filters stay sticky
+    // across menus by design, except Chats entry clears them too.
+    if (v === "chat") {
+      setQuery("");
+      setActiveTagIds([]);
+      setActiveEntities([]);
+      setActiveDateRange(null);
+      setFocusedThread(null);
+    } else {
+      if (v === "threads") setFocusedThread(null);
+      setActiveEntities([]);
+    }
     setView(v);
     setMobileOpen(false);
   };
 
   // Opening a thread shows its newest-first history from the top.
+  // Synthetic sources (e.g. archive summaries) carry keys no chat has;
+  // those clicks are ignored instead of opening an empty thread view.
   const openThread = (key: string) => {
+    if (!items.some((it) => (it.threadUrl || it.titleUrl || null) === key)) {
+      return;
+    }
     setFocusedThread(key);
     setView("chat");
     window.scrollTo(0, 0);
@@ -386,7 +489,7 @@ export const App: React.FC = () => {
 
       <div className="flex-1 min-w-0 flex flex-col min-h-screen">
         {/* Mobile top bar */}
-        <div className="md:hidden sticky top-0 z-30 flex items-center gap-1 px-2 py-2 border-b border-divider bg-canvas/95 backdrop-blur">
+        <div className="md:hidden sticky top-0 z-30 flex items-center gap-1 px-2 h-12 border-b border-divider bg-canvas/95 backdrop-blur">
           <SidebarHamburger onClick={() => setMobileOpen(true)} />
           <span className="text-xl font-bold tracking-tight">ExtBrain</span>
         </div>
@@ -398,6 +501,7 @@ export const App: React.FC = () => {
               entityMap={chatEntities}
               mentionCandidates={mentionCandidates}
               categoryMap={threadCategories}
+              taxonomy={taxonomy}
               minScore={modelConfig.nerScoreFloor ?? 0}
               uuid={uuid}
               onOpenThread={openThread}
@@ -435,7 +539,15 @@ export const App: React.FC = () => {
           )}
 
           {view === "load" && (
-            <div className="space-y-8">
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-lg sm:text-2xl font-bold tracking-tight text-ink leading-tight">
+                  Load Chats
+                </h2>
+                <p className="text-[13px] text-mention mt-1">
+                  Import chat exports, then process them for search and tags.
+                </p>
+              </div>
               <FileUploader
                 onItemsLoaded={handleItemsLoaded}
                 uuid={uuid}
@@ -445,11 +557,13 @@ export const App: React.FC = () => {
                     tags: true,
                     entities: true,
                     categories: true,
+                    taxonomy: true,
                   };
                   handleItemsLoaded(result.items, true);
                   setTags(result.tags);
                   setChatEntities(result.entities);
                   setThreadCategories(result.categories);
+                  setTaxonomyEdits(result.taxonomy);
                   setModelConfig(result.modelConfig);
                 }}
               />
@@ -462,6 +576,7 @@ export const App: React.FC = () => {
                 onEntitiesChange={setChatEntities}
                 categoryMap={threadCategories}
                 onCategoriesChange={setThreadCategories}
+                taxonomy={taxonomy}
               />
             </div>
           )}
@@ -475,8 +590,15 @@ export const App: React.FC = () => {
               mentionCandidates={mentionCandidates}
               onSelectEntities={(keys) => {
                 setQuery("");
-                setActiveTagIds([]);
-                setActiveEntities(keys);
+                // Additive like the Threads search: each search narrows on
+                // top of the header filters (AND), pills remove them.
+                setActiveEntities((prev) => {
+                  const merged = [...prev];
+                  for (const k of keys) {
+                    if (!merged.includes(k)) merged.push(k);
+                  }
+                  return merged;
+                });
                 setActiveDateRange(null);
                 setFocusedThread(null);
               }}
@@ -512,6 +634,7 @@ export const App: React.FC = () => {
               maxTokensPerBatch={modelConfig.maxTokensPerSynthesisBatch}
               onOpenModelSettings={() => navigate("settings")}
               matchScores={activeScores}
+              minScore={modelConfig.nerScoreFloor ?? 0}
             />
           )}
 
@@ -520,6 +643,8 @@ export const App: React.FC = () => {
               items={threadVisibleItems}
               entityMap={chatEntities}
               mentionCandidates={mentionCandidates}
+              categoryMap={threadCategories}
+              taxonomy={taxonomy}
               minScore={modelConfig.nerScoreFloor ?? 0}
               onOpenThread={openThread}
               activeDateRange={activeDateRange}
@@ -527,11 +652,53 @@ export const App: React.FC = () => {
               activeEntities={activeEntities}
               onSelectEntities={(keys) => {
                 setQuery("");
-                setActiveTagIds([]);
                 setActiveEntities(keys);
                 setActiveDateRange(null);
                 setFocusedThread(null);
               }}
+            />
+          )}
+
+          {view === "archive" && (
+            <HistoriesView
+              uuid={uuid}
+              title="Archive"
+              headerExtra={
+                <DateRangePicker
+                  bounds={archiveBounds}
+                  onSelectRange={setArchiveDateRange}
+                />
+              }
+              items={archiveVisibleItems}
+              totalCount={items.length}
+              entityMap={chatEntities}
+              mentionCandidates={mentionCandidates}
+              onSelectEntities={(keys) => {
+                // Additive: each search narrows on top of the header
+                // filters (AND), pills remove them.
+                setArchiveEntities((prev) => {
+                  const merged = [...prev];
+                  for (const k of keys) {
+                    if (!merged.includes(k)) merged.push(k);
+                  }
+                  return merged;
+                });
+              }}
+              activeEntities={archiveEntities}
+              onToggleEntity={(key) =>
+                setArchiveEntities((prev) => prev.filter((k) => k !== key))
+              }
+              scrollTarget={ARCHIVE_SCROLL_TARGET}
+              onVisibleDayChange={noopDayChange}
+              activeTags={[]}
+              onToggleTag={noopTagToggle}
+              onTagThresholdChange={noopThresholdChange}
+              onOpenThread={openThread}
+              minScore={nerScoreFloor}
+              archiveSummary
+              synthesisModel={modelConfig.synthesis}
+              maxTokensPerBatch={modelConfig.maxTokensPerSynthesisBatch}
+              onOpenModelSettings={() => navigate("settings")}
             />
           )}
 
@@ -551,6 +718,8 @@ export const App: React.FC = () => {
               discoveryModel={modelConfig.discovery}
               threshold={taggingThreshold}
               activeTagIds={activeTagIds}
+              taxonomyEdits={taxonomyEdits}
+              onTaxonomyChange={setTaxonomyEdits}
               onOpenTag={(id) => {
                 setQuery("");
                 setActiveEntities([]);

@@ -40,6 +40,26 @@ export function effectiveTagThreshold(tag: TagDef, fallback: number): number {
   return typeof tag.threshold === "number" ? tag.threshold : fallback;
 }
 
+/** Intersection of chat ids matching EVERY tag at each tag's own threshold. */
+export function tagVisibleIds(tags: TagDef[], threshold: number): Set<string> {
+  if (tags.length === 0) return new Set<string>();
+  let ids: Set<string> | null = null;
+  for (const tag of tags) {
+    const mine = new Set(
+      taggedChatIds(tag, effectiveTagThreshold(tag, threshold))
+    );
+    if (ids === null) {
+      ids = mine;
+    } else {
+      for (const id of ids) {
+        if (!mine.has(id)) ids.delete(id);
+      }
+    }
+    if (ids.size === 0) break;
+  }
+  return ids ?? new Set<string>();
+}
+
 const keyFor = (uuid: string) => `sb_tags_${uuid}`;
 
 export function newTagId(): string {

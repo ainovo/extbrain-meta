@@ -27,8 +27,9 @@ import {
   localStorageTotalKB,
   subscribePersistOutcome,
 } from "../lib/compressedJson";
-import { ThreadCategoryMap } from "../lib/categoryTags";
+import { CategoryDef, ThreadCategoryMap } from "../lib/categoryTags";
 import { summarizeThreads } from "../lib/threads";
+import { SectionHeader } from "./ui";
 
 interface Props {
   uuid: string;
@@ -39,6 +40,8 @@ interface Props {
   onEntitiesChange: (map: ChatEntityMap) => void;
   categoryMap: ThreadCategoryMap;
   onCategoriesChange: (map: ThreadCategoryMap) => void;
+  /** Taxonomy in force (Tags-page edits included) for category scoring. */
+  taxonomy: CategoryDef[];
   /** Human-facing minimum chats per mention (default 4). */
   minChats?: number;
 }
@@ -62,6 +65,7 @@ export const EntityProcessSection: React.FC<Props> = ({
   onEntitiesChange,
   categoryMap,
   onCategoriesChange,
+  taxonomy,
   minChats = 4,
 }) => {
   const [job, setJob] = useState<ProcessJobSnapshot>(() =>
@@ -145,14 +149,14 @@ export const EntityProcessSection: React.FC<Props> = ({
       hashes,
       serverVersion,
       categoryMap,
-      { isCancelled: () => cancelled }
+      { isCancelled: () => cancelled, taxonomyIds: taxonomy.map((c) => c.id) }
     ).then((queues) => {
       if (!cancelled) setPendingQueues(queues);
     });
     return () => {
       cancelled = true;
     };
-  }, [items, entityMap, hashes, serverVersion, categoryMap, uuid, job.status, job.uuid]);
+  }, [items, entityMap, hashes, serverVersion, categoryMap, taxonomy, uuid, job.status, job.uuid]);
   const pendingCount =
     (pendingQueues?.ner.length ?? 0) + (pendingQueues?.cats.length ?? 0);
   // Name each phase: a combined "N left" can exceed the chat count (every
@@ -209,6 +213,7 @@ export const EntityProcessSection: React.FC<Props> = ({
       baseHashes,
       baseThreadCategories,
       serverVersion,
+      taxonomy,
       onBatch: (merged, batchHashes) => {
         onEntitiesChange(merged);
         setHashes((prev) => ({ ...prev, ...batchHashes }));
@@ -266,18 +271,19 @@ export const EntityProcessSection: React.FC<Props> = ({
   }, [uuid, job.done, entityMap, categoryMap, persistOutcome]);
 
   return (
-    <div className="space-y-4">
-      <div className="px-1">
-        <h3 className="text-base sm:text-lg font-bold tracking-tight text-ink leading-tight">
-          Process chats
-        </h3>
-        <p className="text-[13px] text-mention mt-1">
-          Finds people, organizations, and places with RoBERTa-large NER for
-          mention search and highlights, then tags each thread with one of
-          9 categories for Top Threads. Newest first, keeps running when
-          you switch pages.
-        </p>
-      </div>
+    <section aria-label="Process chats" className="space-y-4">
+      <SectionHeader
+        title="Process chats"
+        sub={
+          <>
+            Finds people, organizations, and places with RoBERTa-large NER for
+            mention search and highlights, then tags each thread with one of{" "}
+            {taxonomy.length}{" "}
+            {taxonomy.length === 1 ? "category" : "categories"} for Top Threads.
+            Newest first, keeps running when you switch pages.
+          </>
+        }
+      />
 
       {serverVersion !== null && outdatedCount > 0 && !active && (
         <div className="rounded-xl border border-divider bg-tag px-4 py-3 text-[13px] text-ink">
@@ -397,6 +403,6 @@ export const EntityProcessSection: React.FC<Props> = ({
           </div>
         )}
       </div>
-    </div>
+    </section>
   );
 };

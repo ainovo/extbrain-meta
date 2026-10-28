@@ -18,9 +18,14 @@ import {
 import { TagDef, loadTags, saveTags } from "./tags";
 import { ChatEntityMap, loadChatEntities, saveChatEntities } from "./entities";
 import {
+  TaxonomyEdits,
   ThreadCategoryMap,
+  effectiveTaxonomy,
+  loadTaxonomyEdits,
   loadThreadCategories,
+  normalizeTaxonomyEdits,
   normalizeThreadCategoryMap,
+  saveTaxonomyEdits,
   saveThreadCategories,
 } from "./categoryTags";
 import {
@@ -37,6 +42,7 @@ export interface ExportPayload {
   tags: TagDef[];
   entities: ChatEntityMap;
   categories: ThreadCategoryMap;
+  taxonomy: TaxonomyEdits;
   templates: PromptTemplate[];
   modelConfig: DualModelConfig;
 }
@@ -74,6 +80,7 @@ export async function collectExportPayload(
     tags: loadTags(uuid),
     entities: loadChatEntities(uuid),
     categories: loadThreadCategories(uuid),
+    taxonomy: loadTaxonomyEdits(uuid),
     templates: loadCustomThreadTemplates(),
     modelConfig,
   };
@@ -90,6 +97,7 @@ export async function buildExportZip(payload: ExportPayload): Promise<Blob> {
   // Thread-keyed verdicts (per-chat categories.json from older builds is
   // obsolete and intentionally unread).
   zip.file("thread-categories.json", dump(payload.categories));
+  zip.file("thread-taxonomy.json", dump(payload.taxonomy));
   zip.file("custom-templates.json", dump(payload.templates));
   // No secrets live in the model config (the key stays in the server
   // .env), so it exports as-is.
@@ -107,6 +115,7 @@ export async function buildExportZip(payload: ExportPayload): Promise<Blob> {
         tags: payload.tags.length,
         entities: Object.keys(payload.entities).length,
         categories: Object.keys(payload.categories).length,
+        taxonomy: effectiveTaxonomy(payload.taxonomy).length,
         templates: payload.templates.length,
       },
     })
@@ -141,6 +150,7 @@ export interface ParsedBackup {
   tags: TagDef[];
   entities: ChatEntityMap;
   categories: ThreadCategoryMap;
+  taxonomy: TaxonomyEdits;
   templates: PromptTemplate[];
   modelConfig: DualModelConfig;
 }
@@ -267,6 +277,13 @@ export async function parseExportZip(data: Blob | ArrayBuffer): Promise<ParsedBa
   // Missing in pre-category backups: normalize to an empty map (a rescore
   // run refills it) instead of failing the restore.
   const categories = normalizeThreadCategoryMap(await read("thread-categories.json"));
+  // Missing in pre-taxonomy backups: default to unedited built-ins.
+  let taxonomy: TaxonomyEdits = { removed: [], added: [] };
+  try {
+    taxonomy = normalizeTaxonomyEdits(await read("thread-taxonomy.json"));
+  } catch {
+    // optional file: old backups restore fine without it
+  }
   const templates = (await asArray("custom-templates.json")).filter(
     (t): t is PromptTemplate =>
       isRecord(t) &&
@@ -293,6 +310,7 @@ export async function parseExportZip(data: Blob | ArrayBuffer): Promise<ParsedBa
     tags,
     entities,
     categories,
+    taxonomy,
     templates,
     modelConfig: normalizeModelConfig(await read("model-config.json")),
   };
@@ -303,6 +321,7 @@ export interface RestoreResult {
   tags: TagDef[];
   entities: ChatEntityMap;
   categories: ThreadCategoryMap;
+  taxonomy: TaxonomyEdits;
   modelConfig: DualModelConfig;
 }
 
@@ -330,12 +349,14 @@ export async function restoreBackup(
   saveTags(uuid, backup.tags);
   saveChatEntities(uuid, backup.entities);
   saveThreadCategories(uuid, backup.categories);
+  saveTaxonomyEdits(uuid, backup.taxonomy);
   replaceCustomThreadTemplates(backup.templates);
   return {
     items: backup.histories,
     tags: backup.tags,
     entities: backup.entities,
     categories: backup.categories,
+    taxonomy: backup.taxonomy,
     modelConfig,
   };
 }

@@ -1,7 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
-  Hash,
-  AtSign,
   MessagesSquare,
   ExternalLink,
   CalendarDays,
@@ -13,7 +18,11 @@ import {
   ModelEndpointConfig,
   ParsedActivityItem,
 } from "../lib/types";
-import { ChatEntityMap, EntityAggregate } from "../lib/entities";
+import {
+  ChatEntityMap,
+  EntityAggregate,
+  topEntitiesForChatIds,
+} from "../lib/entities";
 import { formatDayRangeLabel } from "../lib/topOfMind";
 import { splitTextWithUrls } from "../lib/urlPreview";
 import { MarkdownInline, MarkdownView } from "./MarkdownView";
@@ -27,6 +36,10 @@ import {
 
 const PAGE_SIZE = 10;
 const EMPTY_TOKENS: string[] = [];
+/** Most subtitle pills ever shown collapsed; narrow rows fit fewer. */
+const MAX_VISIBLE_PILLS = 6;
+/** Fallback pill-row gap in px when it can't be measured (gap-1.5). */
+const PILL_GAP_FALLBACK = 6;
 
 function localDayKey(iso: string): string {
   const d = new Date(iso);
@@ -78,6 +91,12 @@ export interface TagScore {
 interface Props {
   items: ParsedActivityItem[];
   totalCount: number;
+  /** List-mode heading (thread mode always shows the thread title). */
+  title?: string;
+  /** Extra controls at the end of the sticky header row (e.g. date range). */
+  headerExtra?: React.ReactNode;
+  /** List mode: summarize the visible chats from the header (Archive). */
+  archiveSummary?: boolean;
   entityMap: ChatEntityMap;
   /** Shared App-level aggregation for the mention search bar. */
   mentionCandidates: EntityAggregate[];
@@ -100,6 +119,7 @@ interface Props {
   maxTokensPerBatch?: number;
   onOpenModelSettings?: () => void;
   matchScores?: Record<string, TagScore>;
+  minScore?: number;
 }
 
 function formatDayLabel(dayKey: string): string {
@@ -193,6 +213,24 @@ function scrollToChat(id: string) {
   });
 }
 
+function ThreadEntityPill({
+  display,
+  chatCount,
+}: {
+  display: string;
+  chatCount: number;
+}) {
+  return (
+    <span
+      title={`${display} — ${chatCount} ${chatCount === 1 ? "chat" : "chats"}`}
+      className="inline-flex items-center gap-1 rounded-full bg-tag px-2 py-0.5 text-[11px] text-ink whitespace-nowrap shrink-0"
+    >
+      <span className="max-w-48 truncate">{display}</span>
+      <span className="text-mention/70 font-mono shrink-0">{chatCount}</span>
+    </span>
+  );
+}
+
 export const ChatCard = React.memo(function ChatCard({
   item,
   highlightTokens,
@@ -207,7 +245,7 @@ export const ChatCard = React.memo(function ChatCard({
   onOpenThread?: (key: string) => void;
 }) {
   return (
-    <div id={`chat-${item.id}`} className="space-y-3 scroll-mt-4">
+    <div id={`chat-${item.id}`} className="space-y-3 scroll-mt-48 md:scroll-mt-4">
       <div className="flex items-center justify-center gap-2">
         <span className="inline-block rounded-full bg-tag px-3 py-1 text-[11px] text-mention font-mono">
           {formatLocalTime(item.timestamp)} • {item.header}
@@ -254,6 +292,9 @@ export const ChatCard = React.memo(function ChatCard({
 export const HistoriesView: React.FC<Props> = ({
   items,
   totalCount,
+  title = "Chats",
+  headerExtra,
+  archiveSummary = false,
   entityMap,
   mentionCandidates,
   onSelectEntities,
@@ -275,9 +316,15 @@ export const HistoriesView: React.FC<Props> = ({
   maxTokensPerBatch,
   onOpenModelSettings,
   matchScores,
+  minScore = 0,
 }) => {
   const [renderCount, setRenderCount] = useState(PAGE_SIZE);
   const [pendingScrollId, setPendingScrollId] = useState<string | null>(null);
+  const [showAllThreadEntities, setShowAllThreadEntities] = useState(false);
+  const [pillFitCount, setPillFitCount] = useState(MAX_VISIBLE_PILLS);
+  const pillRowRef = useRef<HTMLDivElement | null>(null);
+  const pillMeasureRef = useRef<HTMLDivElement | null>(null);
+  const pillPanelRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
 
@@ -389,6 +436,112 @@ export const HistoriesView: React.FC<Props> = ({
 
   const isThreadView = !!activeThreadKey;
 
+  // A new thread starts collapsed, showing only its top mentions.
+  useEffect(() => {
+    setShowAllThreadEntities(false);
+  }, [activeThreadKey]);
+
+  // Thread view only: every entity mentioned in the thread's chats with
+  // its thread-local chat count, for the subtitle pills below.
+  const threadEntities = useMemo(
+    () =>
+      isThreadView
+        ? topEntitiesForChatIds(
+            ordered.map((it) => it.id),
+            entityMap,
+            Number.MAX_SAFE_INTEGER,
+            minScore
+          )
+        : [],
+    [isThreadView, ordered, entityMap, minScore]
+  );
+
+  // The all-entities panel floats over the list: any page scroll (or
+  // Escape) dismisses it, while scrolling inside the panel itself does
+  // not (overscroll-contain stops the chain; capture sees the target).
+  useEffect(() => {
+    if (!showAllThreadEntities) return;
+    const onScroll = (e: Event) => {
+      if (pillPanelRef.current?.contains(e.target as Node)) return;
+      setShowAllThreadEntities(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowAllThreadEntities(false);
+    };
+    window.addEventListener("scroll", onScroll, {
+      capture: true,
+      passive: true,
+    });
+    document.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("scroll", onScroll, { capture: true });
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [showAllThreadEntities]);
+
+  // The subtitle pill row always stays one line: pills keep full width
+  // and hide from the right one by one as the row narrows. A hidden
+  // measurer sizes every pill, then the row shows the largest fitting
+  // prefix plus the toggle. Layout effect so the count settles before
+  // paint (no clip flash on thread open).
+  useLayoutEffect(() => {
+    if (!isThreadView) return;
+    const row = pillRowRef.current;
+    const meas = pillMeasureRef.current;
+    if (!row || !meas) return;
+    const measured = (el: Element | null, fallback: number): number =>
+      el instanceof HTMLElement && el.offsetWidth > 0
+        ? el.offsetWidth
+        : fallback;
+    const compute = () => {
+      const avail = row.clientWidth;
+      if (avail <= 0) return;
+      const pillEls = Array.from(meas.querySelectorAll("[data-pill]"));
+      const widths = pillEls.map((el) => measured(el, 0));
+      const first = pillEls[0];
+      const second = pillEls[1];
+      const gap =
+        first instanceof HTMLElement && second instanceof HTMLElement
+          ? Math.max(
+              0,
+              second.offsetLeft - (first.offsetLeft + first.offsetWidth)
+            ) || PILL_GAP_FALLBACK
+          : PILL_GAP_FALLBACK;
+      const total = threadEntities.length;
+      const toggleFor = (hidden: number): number =>
+        measured(
+          meas.querySelector(
+            hidden < 10
+              ? "[data-toggle-1]"
+              : hidden < 100
+                ? "[data-toggle-2]"
+                : "[data-toggle-3]"
+          ),
+          72
+        );
+      const cap = Math.min(total, MAX_VISIBLE_PILLS, widths.length);
+      for (let n = cap; n >= 0; n--) {
+        const hidden = total - n;
+        let need = 0;
+        for (let i = 0; i < n; i++) need += widths[i] ?? 0;
+        if (n > 1) need += gap * (n - 1);
+        if (hidden > 0) need += (n > 0 ? gap : 0) + toggleFor(hidden);
+        if (need <= avail) {
+          setPillFitCount(n);
+          return;
+        }
+      }
+      setPillFitCount(0);
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(row);
+    if (typeof document !== "undefined" && document.fonts) {
+      document.fonts.ready.then(() => compute()).catch(() => {});
+    }
+    return () => ro.disconnect();
+  }, [isThreadView, threadEntities]);
+
   const threadSummary = useThreadSummary({
     threadKey: activeThreadKey ?? "",
     threadTitle: activeThreadTitle,
@@ -402,20 +555,101 @@ export const HistoriesView: React.FC<Props> = ({
     onOpenModelSettings: onOpenModelSettings ?? (() => {}),
   });
 
+  // Archive copy of the thread summary: same button/panel UX over the
+  // visible list, scoped under a synthetic source key no chat carries.
+  const archiveSummaryApi = useThreadSummary({
+    threadKey: "archive",
+    threadTitle: "Archive",
+    uuid: uuid ?? "local",
+    items: ordered,
+    synthesisModel: synthesisModel ?? {
+      provider: "meta",
+      model: "",
+    },
+    maxTokensPerBatch: maxTokensPerBatch ?? DEFAULT_MAX_TOKENS_PER_BATCH,
+    onOpenModelSettings: onOpenModelSettings ?? (() => {}),
+  });
+
   return (
     <div>
-      <div className="sticky top-0 z-10 bg-canvas/95 backdrop-blur px-1 py-2 -mt-2 flex items-center gap-3">
-        <div className="min-w-0 flex-1">
+      <div className="sticky top-12 md:top-0 z-10 bg-canvas/95 backdrop-blur px-1 py-2 -mt-2 flex flex-wrap items-center gap-3">
+        {/* min-w-48 (not min-w-0): a zero-basis flex-1 never triggers a
+            wrap, so the title squeezed instead of dropping controls below. */}
+        <div className="min-w-48 flex-1">
           {isThreadView ? (
             <h2 className="text-lg sm:text-2xl font-bold tracking-tight text-ink leading-tight truncate">
               <MarkdownInline markdown={activeThreadTitle || "Thread"} />
             </h2>
           ) : (
-            <h2 className="text-lg sm:text-2xl font-bold tracking-tight text-ink leading-tight">Chats</h2>
+            <h2 className="text-lg sm:text-2xl font-bold tracking-tight text-ink leading-tight">{title}</h2>
           )}
-          <p className="text-[13px] text-mention mt-1">
-            {ordered.length} of {totalCount} chats
-          </p>
+          <div className="flex items-center gap-2 mt-1 min-w-0 relative overflow-hidden">
+            <p className="text-[13px] text-mention shrink-0">
+              {ordered.length} of {totalCount} chats
+            </p>
+            {isThreadView && threadEntities.length > 0 && (
+              <div
+                ref={pillRowRef}
+                className="flex flex-1 items-center gap-1.5 min-w-0 overflow-hidden"
+              >
+                {threadEntities.slice(0, pillFitCount).map((a) => (
+                  <ThreadEntityPill
+                    key={a.key}
+                    display={a.display}
+                    chatCount={a.chatCount}
+                  />
+                ))}
+                {threadEntities.length > pillFitCount && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllThreadEntities((v) => !v)}
+                    aria-expanded={showAllThreadEntities}
+                    className="inline-flex items-center rounded-full bg-tag px-2 py-0.5 text-[11px] text-mention hover:text-ink hover:bg-divider transition whitespace-nowrap shrink-0"
+                  >
+                    {showAllThreadEntities
+                      ? "Show less"
+                      : `+${threadEntities.length - pillFitCount} more`}
+                  </button>
+                )}
+              </div>
+            )}
+            {isThreadView && threadEntities.length > 0 && (
+              <div
+                ref={pillMeasureRef}
+                aria-hidden="true"
+                className="absolute left-0 top-0 invisible flex w-max items-center gap-1.5 whitespace-nowrap pointer-events-none"
+              >
+                {threadEntities.slice(0, MAX_VISIBLE_PILLS).map((a) => (
+                  <span
+                    key={a.key}
+                    data-pill="true"
+                    className="inline-flex items-center gap-1 rounded-full bg-tag px-2 py-0.5 text-[11px] whitespace-nowrap shrink-0"
+                  >
+                    <span className="max-w-48 truncate">{a.display}</span>
+                    <span className="font-mono shrink-0">{a.chatCount}</span>
+                  </span>
+                ))}
+                <span
+                  data-toggle-1="true"
+                  className="inline-flex items-center rounded-full bg-tag px-2 py-0.5 text-[11px] whitespace-nowrap shrink-0"
+                >
+                  +8 more
+                </span>
+                <span
+                  data-toggle-2="true"
+                  className="inline-flex items-center rounded-full bg-tag px-2 py-0.5 text-[11px] whitespace-nowrap shrink-0"
+                >
+                  +88 more
+                </span>
+                <span
+                  data-toggle-3="true"
+                  className="inline-flex items-center rounded-full bg-tag px-2 py-0.5 text-[11px] whitespace-nowrap shrink-0"
+                >
+                  +888 more
+                </span>
+              </div>
+            )}
+          </div>
         </div>
         {isThreadView && activeThreadKey ? (
           <div className="flex items-center gap-2 shrink-0">
@@ -427,7 +661,8 @@ export const HistoriesView: React.FC<Props> = ({
                 title="Back to all threads"
                 className="inline-flex items-center gap-1 rounded-lg bg-action px-3 py-1.5 text-xs font-medium text-white hover:bg-action-hover transition shrink-0"
               >
-                <MessagesSquare className="w-3.5 h-3.5" /> All threads
+                <MessagesSquare className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">All threads</span>
               </button>
             )}
             <a
@@ -437,7 +672,8 @@ export const HistoriesView: React.FC<Props> = ({
               title="Resume source thread"
               className="inline-flex items-center gap-1 rounded-lg bg-action px-3 py-1.5 text-xs font-medium text-white hover:bg-action-hover transition shrink-0"
             >
-              Resume <ExternalLink className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Resume</span>
+              <ExternalLink className="w-3.5 h-3.5" />
             </a>
           </div>
         ) : (
@@ -452,7 +688,6 @@ export const HistoriesView: React.FC<Props> = ({
                     title="Remove this entity from the filter"
                     className="inline-flex items-center gap-1.5 rounded-full bg-mention px-3 py-1 text-xs font-medium text-white hover:bg-ink transition-colors shrink-0"
                   >
-                    <AtSign className="w-3.5 h-3.5 text-white/70" />
                     {key}
                     <X className="w-3 h-3 opacity-60" />
                   </button>
@@ -475,40 +710,73 @@ export const HistoriesView: React.FC<Props> = ({
                 </button>
               </div>
             )}
-            {activeTags.length > 0 && (
-              <div className="flex items-start gap-3 min-w-0 overflow-x-auto">
-                {activeTags.map((t) => (
-                  <div key={t.id} className="flex w-fit shrink-0 flex-col gap-1">
-                    <button
-                      type="button"
-                      onClick={() => onToggleTag(t.id)}
-                      title="Remove this tag from the filter"
-                      className="inline-flex items-center justify-center gap-1.5 rounded-full bg-action px-3 py-1 text-xs font-medium text-white hover:bg-action-hover transition-colors"
-                    >
-                      <Hash className="w-3.5 h-3.5" />
-                      {displayTagName(t.name)}
-                      <X className="w-3 h-3 opacity-60" />
-                    </button>
-                    <TagThresholdControl
-                      tagName={t.name}
-                      value={t.threshold}
-                      onChange={(v) => onTagThresholdChange(t.id, v)}
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
           </>
         )}
+        {/* Tag filters are sticky: they narrow the thread review too, so
+            the pills stay visible (and removable) in the thread view.
+            Entity and date facets are bypassed there, so theirs stay
+            hidden. */}
+        {activeTags.length > 0 && (
+          <div className="flex items-start gap-3 min-w-0 overflow-x-auto">
+            {activeTags.map((t) => (
+              <div key={t.id} className="flex w-fit shrink-0 flex-col gap-1">
+                <button
+                  type="button"
+                  onClick={() => onToggleTag(t.id)}
+                  title="Remove this tag from the filter"
+                  className="inline-flex items-center justify-center gap-1.5 rounded-full bg-action px-3 py-1 text-xs font-medium text-white hover:bg-action-hover transition-colors"
+                >
+                  {displayTagName(t.name)}
+                  <X className="w-3 h-3 opacity-60" />
+                </button>
+                <TagThresholdControl
+                  tagName={t.name}
+                  value={t.threshold}
+                  onChange={(v) => onTagThresholdChange(t.id, v)}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+        {headerExtra}
+        {archiveSummary && !isThreadView && synthesisModel && (
+          // Right-aligned so the right-anchored template dropdown stays
+          // on-screen when the button wraps to its own row.
+          <div className="ml-auto shrink-0">
+            <ThreadSummaryButton api={archiveSummaryApi} />
+          </div>
+        )}
+        {isThreadView &&
+          showAllThreadEntities &&
+          threadEntities.length > 0 && (
+            <div
+              ref={pillPanelRef}
+              className="absolute inset-x-0 top-full z-30 mt-1 rounded-xl border border-divider bg-white shadow-lg p-3 max-h-64 overflow-y-auto overscroll-contain"
+            >
+              <div className="flex flex-wrap gap-1.5">
+                {threadEntities.map((a) => (
+                  <ThreadEntityPill
+                    key={a.key}
+                    display={a.display}
+                    chatCount={a.chatCount}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
       </div>
 
       {!isThreadView && (
         <div className="px-1 sm:px-4 pt-3">
           <MentionSearchBar
+            key={activeEntities.join("\n")}
             candidates={mentionCandidates}
             hasEntities={Object.keys(entityMap).length > 0}
             onViewChats={onSelectEntities}
             noun="chats"
+            stagePicks
+            requireSelection
+            excludeKeys={activeEntities}
           />
         </div>
       )}
@@ -516,6 +784,12 @@ export const HistoriesView: React.FC<Props> = ({
       {isThreadView && activeThreadKey && synthesisModel && (
         <div className="px-1 sm:px-4 pt-3">
           <ThreadSummaryPanel api={threadSummary} />
+        </div>
+      )}
+
+      {!isThreadView && archiveSummary && synthesisModel && (
+        <div className="px-1 sm:px-4 pt-3">
+          <ThreadSummaryPanel api={archiveSummaryApi} />
         </div>
       )}
 
@@ -530,7 +804,7 @@ export const HistoriesView: React.FC<Props> = ({
             return (
               <React.Fragment key={item.id}>
                 {showDivider && (
-                  <div id={`day-${dayKey}`} data-day-divider={dayKey} className="scroll-mt-16 flex items-center gap-3 pt-1">
+                  <div id={`day-${dayKey}`} data-day-divider={dayKey} className="scroll-mt-48 md:scroll-mt-16 flex items-center gap-3 pt-1">
                     <div className="text-[11px] font-semibold uppercase tracking-wider text-mention/60">
                       {formatDayLabel(dayKey)}
                     </div>
