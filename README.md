@@ -18,6 +18,9 @@ Let's face it: no one can keep track of tens of thousands of chats across multip
 
 Instead of relying on AI to guess what's important, ExtBrain empowers humans to extract exact insights from their historical chat data.
 
+<img width="498" height="532" alt="image" src="https://github.com/user-attachments/assets/ad79819d-8e73-47dc-83c4-252948c4e756" />
+
+
 ### Core Capabilities
 
 *   **Granular Entity Search:** Look for specific threads involving certain people, products, brands, companies, topics, or places.
