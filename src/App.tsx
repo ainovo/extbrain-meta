@@ -52,6 +52,7 @@ import {
 import { DateRangePicker } from "./components/DateRangePicker";
 import { TopOfMind } from "./components/TopOfMind";
 import { UrlPreviewLayer } from "./components/UrlPreviewLayer";
+import { VoiceAssistant } from "./components/VoiceAssistant";
 
 const MODEL_KEY = "takeout_summarizer_model_config_v1";
 
@@ -59,6 +60,7 @@ const DEFAULT_MODEL_CONFIG: DualModelConfig = {
   useSameModel: false,
   discovery: { provider: "meta", model: DEFAULT_CONTRIBUTOR_MODEL },
   synthesis: { provider: "meta", model: DEFAULT_CONTRIBUTOR_MODEL },
+  voice: { provider: "meta", model: DEFAULT_CONTRIBUTOR_MODEL },
   maxTokensPerSynthesisBatch: DEFAULT_MAX_TOKENS_PER_BATCH,
   zeroShotThreshold: 0.4,
   nerScoreFloor: 0,
@@ -489,7 +491,7 @@ export const App: React.FC = () => {
 
       <div className="flex-1 min-w-0 flex flex-col min-h-screen">
         {/* Mobile top bar */}
-        <div className="md:hidden sticky top-0 z-30 flex items-center gap-1 px-2 h-12 border-b border-divider bg-canvas/95 backdrop-blur">
+        <div className="md:hidden sticky top-0 z-40 flex items-center gap-1 px-2 h-12 border-b border-divider bg-canvas/95 backdrop-blur">
           <SidebarHamburger onClick={() => setMobileOpen(true)} />
           <span className="text-xl font-bold tracking-tight">ExtBrain</span>
         </div>
@@ -761,6 +763,17 @@ export const App: React.FC = () => {
       </div>
 
       <UrlPreviewLayer />
+      <VoiceAssistant
+        items={items}
+        entityMap={chatEntities}
+        voiceModel={
+          modelConfig.voice ?? {
+            provider: "meta",
+            model: DEFAULT_CONTRIBUTOR_MODEL,
+          }
+        }
+        minScore={nerScoreFloor}
+      />
     </div>
   );
 };

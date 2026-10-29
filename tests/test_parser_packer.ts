@@ -123,6 +123,11 @@ import {
   joinHistoriesChunks,
 } from "../src/lib/storage";
 import { fuzzyFilter } from "../src/lib/fuzzySearch";
+import {
+  encodeWavMono16,
+  findChats,
+  formatFindChatsResult,
+} from "../src/lib/voiceAgent";
 
 const FIXTURE_ENTRIES: RawTakeoutEntry[] = [
   {
@@ -2079,6 +2084,105 @@ async function runTests() {
       fuzzyFilter(fzItems, "  ").length === 3,
     "fuzzyFilter requires EVERY query token to match"
   );
+  // Voice find_chats: in-range chats mentioning ANY entity match, via an
+  // NER mention (v1), a text substring (v2), or a spaceless hit (v3);
+  // out-of-range (v4) and unmatched (v5) chats drop out, newest first.
+  const vItem = (
+    id: string,
+    daysAgo: number,
+    prompt: string,
+    title: string
+  ): ParsedActivityItem =>
+    ({
+      ...mkItem(id, isoDaysAgo(daysAgo), undefined, "ChatGPT", prompt),
+      allPromptsText: prompt,
+      condensedResponseText: "",
+      fullMarkdown: "",
+      cleanTitle: title,
+      extractedEntities: [],
+    }) as ParsedActivityItem;
+  const vItems = [
+    vItem("v1", 0, "shopify pricing tiers?", "Shopify pricing"),
+    vItem("v2", 1, "rotate my openai api key", "API keys"),
+    vItem("v3", 2, "compare Open AI models", "Model compare"),
+    vItem("v4", 10, "old shopify thread", "Old Shopify"),
+    vItem("v5", 0, "what is for dinner", "Dinner"),
+  ];
+  const vMap: ChatEntityMap = {
+    v1: [{ name: "Shopify", type: "ORG" }],
+    v4: [{ name: "Shopify", type: "ORG" }],
+  };
+  const vFound = findChats(vItems, vMap, {
+    start_date: "2026-10-20",
+    end_date: "2026-10-24",
+    entities: ["shopify", "openai"],
+  });
+  assert(
+    vFound.totalMatches === 3 &&
+      vFound.chats.map((c) => c.id).join(",") === "v1,v2,v3" &&
+      vFound.chats[0].matchedEntities.join(",") === "shopify" &&
+      vFound.chats[1].date === "2026-10-23",
+    "findChats keeps in-range chats matching ANY entity (mention, substring, spaceless), newest first"
+  );
+  const vNone = findChats(vItems, vMap, {
+    start_date: "2026-10-20",
+    end_date: "2026-10-24",
+    entities: ["zzz-nope"],
+  });
+  assert(
+    vNone.totalMatches === 0 &&
+      formatFindChatsResult(vNone).startsWith("No chats in") &&
+      formatFindChatsResult(vFound).includes("3 chat(s)"),
+    "findChats reports zero matches plainly and formats hits with counts"
+  );
+  let vThrew = 0;
+  try {
+    findChats(vItems, vMap, {
+      start_date: "2026-13-01",
+      end_date: "2026-10-24",
+      entities: ["x"],
+    });
+  } catch {
+    vThrew++;
+  }
+  try {
+    findChats(vItems, vMap, {
+      start_date: "2026-10-20",
+      end_date: "2026-10-24",
+      entities: [],
+    });
+  } catch {
+    vThrew++;
+  }
+  assert(
+    vThrew === 2,
+    "findChats rejects bad dates and empty entities"
+  );
+  // WAV writer: 44-byte RIFF header plus little-endian int16 samples.
+  const wav = new DataView(
+    encodeWavMono16(new Float32Array([0, 1, -1, 0.5]), 24000)
+  );
+  const wavAscii = (off: number, len: number) => {
+    let s = "";
+    for (let i = 0; i < len; i++) s += String.fromCharCode(wav.getUint8(off + i));
+    return s;
+  };
+  assert(
+    wav.byteLength === 52 &&
+      wavAscii(0, 4) === "RIFF" &&
+      wavAscii(8, 4) === "WAVE" &&
+      wavAscii(12, 4) === "fmt " &&
+      wavAscii(36, 4) === "data" &&
+      wav.getUint32(4, true) === 44 &&
+      wav.getUint32(24, true) === 24000 &&
+      wav.getUint16(22, true) === 1 &&
+      wav.getUint16(34, true) === 16 &&
+      wav.getInt16(44, true) === 0 &&
+      wav.getInt16(46, true) === 0x7fff &&
+      wav.getInt16(48, true) === -0x8000 &&
+      wav.getInt16(50, true) === Math.floor(0.5 * 0x7fff),
+    "encodeWavMono16 writes a valid mono 16-bit WAV"
+  );
   // Tiny token budget forces one batch per chat; the production budget
   // packs the same chats into a single small batch.
   const bigPlan = planSynthesis(expItems, 1);
@@ -2738,6 +2842,7 @@ async function runTests() {
       useSameModel: true,
       discovery: { provider: "meta", model: "muse-spark-1.3" },
       synthesis: { provider: "meta", model: "muse-wonder-1.0" },
+      voice: { provider: "meta", model: "muse-spark-1.3-contributor" },
       maxTokensPerSynthesisBatch: 45000,
       zeroShotThreshold: 0.4,
     },
@@ -2913,7 +3018,9 @@ async function runTests() {
       legacyMigrated.discovery.model === "muse-spark-1.3" &&
       !("apiKey" in legacyMigrated.discovery) &&
       legacyMigrated.synthesis.provider === "meta" &&
-      legacyMigrated.synthesis.model === "muse-wonder-1.0",
+      legacyMigrated.synthesis.model === "muse-wonder-1.0" &&
+      legacyMigrated.voice.provider === "meta" &&
+      normalizeModelConfig({}).voice.model === "muse-spark-1.3",
     "normalizeModelConfig migrates pre-Meta configs to Meta-only endpoints"
   );
   assert(

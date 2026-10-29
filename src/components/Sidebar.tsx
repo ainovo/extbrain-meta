@@ -351,7 +351,7 @@ export const Sidebar: React.FC<Props> = (props) => {
     <>
       {/* Desktop */}
       <aside
-        className={`hidden md:flex flex-col shrink-0 border-r border-divider bg-canvas transition-all duration-200 h-screen sticky top-0 ${
+        className={`hidden md:flex flex-col shrink-0 border-r border-divider bg-canvas transition-all duration-200 h-screen sticky top-0 z-40 ${
           collapsed ? "w-16" : "w-64"
         }`}
       >

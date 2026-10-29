@@ -487,6 +487,23 @@ export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMa
         </SettingsSection>
 
         <SettingsSection
+          id="voice"
+          title="Voice agent"
+          collapsed={collapsed.has("voice")}
+          onToggle={toggle}
+        >
+          <EndpointEditor
+            title="Voice agent model"
+            subtitle="Answers spoken questions about your chats, searching by date and entity."
+            endpoint={config.voice}
+            defaultModel={DEFAULT_CONTRIBUTOR_MODEL}
+            onUpdate={(updated) =>
+              onChange({ ...config, voice: updated })
+            }
+          />
+        </SettingsSection>
+
+        <SettingsSection
           id="data"
           title="Data"
           collapsed={collapsed.has("data")}

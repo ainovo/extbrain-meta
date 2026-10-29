@@ -198,6 +198,7 @@ export function normalizeModelConfig(raw: unknown): DualModelConfig {
     useSameModel: r.useSameModel !== false,
     discovery: normalizeEndpoint(r.discovery),
     synthesis: normalizeEndpoint(r.synthesis),
+    voice: normalizeEndpoint(r.voice),
     maxTokensPerSynthesisBatch: maxTokens,
     zeroShotThreshold: threshold,
     ...(nerFloor !== undefined ? { nerScoreFloor: nerFloor } : {}),

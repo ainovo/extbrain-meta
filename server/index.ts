@@ -1260,6 +1260,317 @@ app.post("/api/synthesize-thread-stream", async (req, res) => {
   }
 });
 
+/** Muse Voice Transcribe model for /api/voice-transcribe. See https://dev.meta.ai/docs/speech-to-text */
+const VOICE_TRANSCRIBE_MODEL = "muse-voice-transcribe-1.0";
+
+/**
+ * Transcribe a short voice command. The browser records the mic, converts
+ * to mono 16-bit PCM WAV at 24kHz, and posts it as base64; the key stays
+ * server-side and the audio is only ever forwarded to Meta's ASR endpoint.
+ */
+app.post("/api/voice-transcribe", async (req, res) => {
+  try {
+    const apiKey = metaApiKey();
+    if (!apiKey) {
+      res.status(400).json({
+        error:
+          "Missing Meta API key. Set MODEL_API_KEY in the server .env (create one at https://dev.meta.ai).",
+      });
+      return;
+    }
+    const { audioBase64 } = req.body as { audioBase64?: unknown };
+    if (typeof audioBase64 !== "string" || audioBase64.length === 0) {
+      res.status(400).json({ error: "No audio provided." });
+      return;
+    }
+    // ~18MB of audio; Meta caps request bodies at 32MB / 10 minutes.
+    if (audioBase64.length > 24_000_000) {
+      res.status(413).json({
+        error: "Voice clip too long. Keep questions under a minute.",
+      });
+      return;
+    }
+    let pcm: Buffer;
+    try {
+      pcm = Buffer.from(audioBase64, "base64");
+    } catch {
+      res.status(400).json({ error: "Audio is not valid base64." });
+      return;
+    }
+    if (pcm.length === 0) {
+      res.status(400).json({ error: "No audio provided." });
+      return;
+    }
+    const form = new FormData();
+    form.append(
+      "request",
+      new Blob(
+        [
+          JSON.stringify({
+            mode: "PUSH_TO_TALK",
+            model: VOICE_TRANSCRIBE_MODEL,
+            audioEncoding: "WAV",
+          }),
+        ],
+        { type: "application/json" }
+      )
+    );
+    const bytes = pcm.buffer.slice(
+      pcm.byteOffset,
+      pcm.byteOffset + pcm.byteLength
+    ) as ArrayBuffer;
+    form.append("audio", new Blob([bytes], { type: "audio/wav" }), "clip.wav");
+    const sessionId = `voice-${crypto.randomUUID()}`;
+    const resp = await fetch(
+      `${META_API_BASE_URL}/asr/transcribe?sessionId=${sessionId}`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form,
+      }
+    );
+    if (!resp.ok) {
+      const errText = await resp.text();
+      const status =
+        resp.status === 400 || resp.status === 413 || resp.status === 429
+          ? resp.status
+          : 500;
+      res.status(status).json({
+        error: `Transcription failed (${resp.status}): ${errText.slice(0, 400)}`,
+      });
+      return;
+    }
+    const data = (await resp.json()) as {
+      transcript?: unknown;
+      audioDurationMs?: unknown;
+    };
+    res.json({
+      transcript:
+        typeof data.transcript === "string" ? data.transcript.trim() : "",
+      audioDurationMs:
+        typeof data.audioDurationMs === "number" ? data.audioDurationMs : null,
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: message });
+  }
+});
+
+const FIND_CHATS_TOOL = {
+  type: "function",
+  function: {
+    name: "find_chats",
+    description:
+      "Find chat history within an inclusive date range mentioning any of the given entities. Returns matching chats with dates, titles, user prompts, and excerpts.",
+    parameters: {
+      type: "object",
+      properties: {
+        start_date: {
+          type: "string",
+          description: "Range start, YYYY-MM-DD.",
+        },
+        end_date: {
+          type: "string",
+          description: "Range end, YYYY-MM-DD (inclusive).",
+        },
+        entities: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "People, organizations, places, or topics. A chat matches when it mentions any of them.",
+        },
+      },
+      required: ["start_date", "end_date", "entities"],
+    },
+  },
+};
+
+function voiceSystemPrompt(today: Date): string {
+  const y = today.getFullYear();
+  const m = String(today.getMonth() + 1).padStart(2, "0");
+  const d = String(today.getDate()).padStart(2, "0");
+  const weekday = today.toLocaleDateString("en-US", { weekday: "long" });
+  return [
+    `You are a voice assistant answering questions about the user's chat history. Today is ${y}-${m}-${d} (${weekday}).`,
+    "",
+    "To answer, first translate the request into a find_chats call: a start_date and end_date (YYYY-MM-DD) plus 1-6 entities (people, organizations, places, topics; split phrases like 'OpenAI ads campaign' into separate entities such as openai, ads). Resolve relative dates against today: a bare month ('in Sep') means the most recent such month on or before today; 'last week' means the previous Monday-to-Sunday week; 'yesterday'/'today' map to those dates.",
+    "If the start date, end date, or entities cannot be determined, do NOT call the tool: ask one short clarifying question instead.",
+    "After find_chats returns, answer from those chats only — never invent details. Reply with the TL;DR only: no preamble about searching, no thinking process, no narration of tool calls. Start with one short paragraph (1-3 sentences), then at most 3 short bullets with dates. Keep the whole reply under ~120 words. Use simple GitHub-flavored markdown only: **bold**, bullets (-), and plain URLs. No tables, headings, nested lists, or HTML.",
+    "If the chats lack the requested detail, say so in one sentence and ask the user whether to revise the requirement (different dates or entities).",
+  ].join("\n");
+}
+
+interface VoiceAgentMessage {
+  role: "user" | "assistant" | "tool";
+  content?: string | null;
+  tool_call_id?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }>;
+}
+
+function sanitizeVoiceMessages(raw: unknown): VoiceAgentMessage[] | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 40) return null;
+  const out: VoiceAgentMessage[] = [];
+  let chars = 0;
+  for (const m of raw) {
+    if (!m || typeof m !== "object") return null;
+    const r = m as Record<string, unknown>;
+    if (r.role !== "user" && r.role !== "assistant" && r.role !== "tool") {
+      return null;
+    }
+    const content =
+      typeof r.content === "string" ? r.content : r.content === null ? null : undefined;
+    if (typeof content === "string") {
+      chars += content.length;
+      if (chars > 200_000) return null;
+    }
+    const msg: VoiceAgentMessage = { role: r.role, content: content ?? null };
+    if (r.role === "tool") {
+      if (typeof r.tool_call_id !== "string" || !r.tool_call_id) return null;
+      msg.tool_call_id = r.tool_call_id;
+    }
+    if (r.role === "assistant" && Array.isArray(r.tool_calls)) {
+      const calls: VoiceAgentMessage["tool_calls"] = [];
+      for (const c of r.tool_calls) {
+        const cc = c as Record<string, unknown>;
+        const fn = cc.function as Record<string, unknown> | undefined;
+        if (
+          typeof cc.id !== "string" ||
+          typeof fn?.name !== "string" ||
+          typeof fn?.arguments !== "string"
+        ) {
+          return null;
+        }
+        calls.push({
+          id: cc.id,
+          type: "function",
+          function: { name: fn.name, arguments: fn.arguments },
+        });
+      }
+      if (calls.length > 0) msg.tool_calls = calls;
+    }
+    out.push(msg);
+  }
+  return out;
+}
+
+/**
+ * One voice-agent turn. The client owns the tool loop: it sends the
+ * conversation, executes any returned find_chats calls against local
+ * chats, and posts results back as tool messages.
+ */
+app.post("/api/voice-agent", async (req, res) => {
+  try {
+    const apiKey = metaApiKey();
+    if (!apiKey) {
+      res.status(400).json({
+        error:
+          "Missing Meta API key. Set MODEL_API_KEY in the server .env (create one at https://dev.meta.ai).",
+      });
+      return;
+    }
+    const { model, messages } = req.body as {
+      model?: unknown;
+      messages?: unknown;
+    };
+    if (typeof model !== "string" || !model.trim()) {
+      res.status(400).json({
+        error: "No voice agent model selected. Pick one in Settings → Voice agent.",
+      });
+      return;
+    }
+    const clean = sanitizeVoiceMessages(messages);
+    if (!clean) {
+      res.status(400).json({ error: "Invalid conversation messages." });
+      return;
+    }
+    const body: Record<string, unknown> = {
+      model: model.trim(),
+      messages: [
+        { role: "system", content: voiceSystemPrompt(new Date()) },
+        ...clean,
+      ],
+      tools: [FIND_CHATS_TOOL],
+      temperature: 0.3,
+      reasoning_effort: REASONING_EFFORT,
+    };
+    const MAX_429_RETRIES = 3;
+    for (let attempt = 0; ; attempt++) {
+      const resp = await fetch(`${META_API_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as {
+          choices?: Array<{
+            message?: {
+              content?: string | null;
+              tool_calls?: Array<{
+                id?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+          }>;
+        };
+        const msg = data.choices?.[0]?.message ?? {};
+        const toolCalls = Array.isArray(msg.tool_calls)
+          ? msg.tool_calls
+              .filter(
+                (c) =>
+                  c &&
+                  typeof c.id === "string" &&
+                  typeof c.function?.name === "string" &&
+                  typeof c.function?.arguments === "string"
+              )
+              .map((c) => ({
+                id: c.id as string,
+                type: "function" as const,
+                function: {
+                  name: c.function?.name as string,
+                  arguments: c.function?.arguments as string,
+                },
+              }))
+          : [];
+        res.json({
+          message: {
+            role: "assistant" as const,
+            content:
+              typeof msg.content === "string" ? msg.content : null,
+            ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+          },
+        });
+        return;
+      }
+      const errText = await resp.text();
+      if (resp.status !== 429 || attempt >= MAX_429_RETRIES) {
+        throw new Error(
+          `Meta Model API Error (${resp.status}): ${errText.slice(0, 400)}`
+        );
+      }
+      const retryAfterSec = Number(resp.headers.get("retry-after"));
+      await new Promise((r) =>
+        setTimeout(
+          r,
+          retryDelayMs(
+            attempt,
+            Number.isFinite(retryAfterSec) ? retryAfterSec : null
+          )
+        )
+      );
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: message });
+  }
+});
+
 // Serve static frontend in production (Google Cloud Run)
 const distPath = path.resolve(__dirname, "../dist");
 app.use(express.static(distPath));

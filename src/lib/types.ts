@@ -157,6 +157,8 @@ export interface DualModelConfig {
   discovery: ModelEndpointConfig;
   /** Summary generation model (final project summary). */
   synthesis: ModelEndpointConfig;
+  /** Voice agent model (answers spoken questions about chats). */
+  voice: ModelEndpointConfig;
   maxTokensPerSynthesisBatch: number;
   /** Auto-tag rule: keep chat when max_target_score >= threshold AND > max_contrast_score. */
   zeroShotThreshold?: number;
