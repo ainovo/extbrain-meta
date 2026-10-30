@@ -23,34 +23,36 @@ Instead of relying on AI to guess what's important, ExtBrain empowers humans to 
 
 ### Core Capabilities
 
+*   **Multi-Source Import:** Load ChatGPT exports, Gemini / Google Search AI Mode Takeout, and Obsidian notes into one searchable library.
 *   **Granular Entity Search:** Look for specific threads involving certain people, products, brands, companies, topics, or places.
-*   **Smart Tags** Tag chats with natural language like:
+*   **Smart Tags:** Tag chats with natural language like:
     *   *"Extract all our discussions, copy iterations, and performance results around user acquisition."*
     *   *"Pull together everything we figured out about our database schema redesign."*
-*   **Insight Generation:** Ask ExtBrain to generate tl;drs, retrospectives, weekly reports, project milestones, and action items from past conversations.
-*   **Voice-Agent:** Use voice chat to give ExtBrain requirements, and it will respond with exactly what you need from your history.
+*   **Thread Categories & Activity Breakdown:** Every thread is classified into a 9-category taxonomy (business, finance, health, …); the activity view shows screen-time-style duration, chat, and thread stats per category.
+*   **Insight Generation:** One-click Summarize button with six built-in templates — Milestone Timeline, Learnings, Action Items, Retrospective, Decisions, Research Summary — plus your own custom templates. Outputs include TL;DRs, reports, and action items with deadlines and Add-to-Calendar links.
+*   **Voice-Agent:** Ask years of chats anything out loud — hands-free auto-send on end of speech — and get answers synthesized from your history.
+*   **Top of Mind & Action Items:** Dedicated views that keep decisions, open loops, and extracted tasks in front of you.
 
 ## Technical Architecture: Anti-RAG
 
-Technically, ExtBrain **is not a RAG** (Retrieval-Augmented Generation) system. It is a lightweight web application designed to run locally on your machine (`localhost`) or via our hosted web platform [Link TBD].
+Technically, ExtBrain **is not a RAG** (Retrieval-Augmented Generation) system. It is a lightweight web application designed to run locally on your machine (`localhost`) or via our hosted web platform at [extbrain.ai](https://extbrain.ai).
 
 Instead of chunking text and using vector similarities to guess relevance, ExtBrain uses deterministic extraction and structuring:
 
 *   **On-Device NER (XLM-R) [Meta-based]:** Davlan XLM-RoBERTa-base NER — fine-tuned from Meta's FacebookAI/xlm-roberta-base — runs locally via quantized ONNX to extract people, organizations, places, and dates directly from raw messages.
 *   **On-Device NLI Tagging (MiniLMv2):** A multilingual MiniLMv2 (Meta XLM-R-based) zero-shot classifier scores Smart Tags and thread categories locally.
-*   **Modal NER/NLI Option:** Settings offers a Modal-hosted backend (Davlan XLM-R NER + symanto XLM-R NLI) for massive chat repositories; the Load page processes through it when selected, otherwise the local models do the work.
+*   **Modal NER/NLI Option:** Settings offers a Modal-hosted backend (Davlan XLM-R NER + MiniLMv2 NLI, same models as local) for massive chat repositories; the Load page processes through it when selected, otherwise the local models do the work.
 *   **Meta Muse Models:** Leverages Meta Muse models for highly accurate summarization and synthesis.
 *   **Bring-Your-Own-Key (BYOK):** Full flexibility to plug in your Meta model keys.
 
 ## Getting Started
 
 ```bash
-# Example placeholder for local setup
 git clone https://github.com/ainovo/extbrain-meta.git
 cd extbrain-meta
 npm install
 npm run prepare:ner   # one-time XLM-R NER weights (~1.4GB, pre-quantized ONNX port)
-npm run dev
+npm run dev           # app at http://localhost:5173 (API on :8080)
 ```
 ## License
 Copyright (c) 2026 Ainovo Co.

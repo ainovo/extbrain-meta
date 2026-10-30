@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Run ExtBrain locally — ExtBrain</title>
+  <meta
+    name="description"
+    content="Install ExtBrain on your own Mac or Windows machine in five minutes."
+  />
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+</head>
+<body>
+  <header class="site-nav">
+    <a class="brand" href="./index.html" aria-label="ExtBrain home">
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="#0064E0"
+        stroke-width="1.75"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path
+          d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"
+        />
+        <path
+          d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"
+        />
+      </svg>
+      <span>ExtBrain</span>
+    </a>
+    <div class="nav-right">
+      <a
+        class="gh-link"
+        href="https://github.com/ainovo/extbrain-meta"
+        target="_blank"
+        rel="noopener"
+        aria-label="ExtBrain on GitHub"
+        title="ExtBrain on GitHub"
+      >
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path
+            d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656"
+          />
+        </svg>
+      </a>
+      <a class="cta" href="https://extbrain.ai">Open ExtBrain</a>
+    </div>
+  </header>
+
+  <main class="setup">
+    <h1>Run ExtBrain on your machine.</h1>
+    <p class="lede">
+      Free and open source (AGPLv3). Five minutes, two prerequisites.
+    </p>
+
+    <h2>1. Prerequisites</h2>
+    <div class="setup-tabs" role="tablist" aria-label="Operating system">
+      <button
+        type="button"
+        role="tab"
+        class="setup-tab on"
+        data-os="mac"
+        aria-selected="true"
+      >
+        Mac
+      </button>
+      <button
+        type="button"
+        role="tab"
+        class="setup-tab"
+        data-os="windows"
+        aria-selected="false"
+      >
+        Windows
+      </button>
+    </div>
+
+    <div class="setup-panel" id="panel-mac" role="tabpanel">
+      <p>
+        Install <strong>Node.js 18+</strong> and
+        <strong>Python 3</strong> (for the one-time NER weights):
+      </p>
+      <div class="codeblock">
+        <pre><code>brew install node python3</code></pre>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+      <p class="setup-note">
+        No Homebrew? Grab the installers from
+        <a href="https://nodejs.org" target="_blank" rel="noopener">nodejs.org</a>
+        and
+        <a href="https://python.org" target="_blank" rel="noopener">python.org</a>.
+      </p>
+    </div>
+
+    <div class="setup-panel" id="panel-windows" role="tabpanel" hidden>
+      <p>
+        Install <strong>Node.js 18+ LTS</strong> and
+        <strong>Python 3</strong> (for the one-time NER weights):
+      </p>
+      <div class="codeblock">
+        <pre><code>winget install OpenJS.NodeJS Python.Python.3</code></pre>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+      <p class="setup-note">
+        Prefer installers? Get them from
+        <a href="https://nodejs.org" target="_blank" rel="noopener">nodejs.org</a>
+        and
+        <a href="https://python.org" target="_blank" rel="noopener">python.org</a>
+        (tick “Add python.exe to PATH”).
+      </p>
+    </div>
+
+    <h2>2. Install &amp; run</h2>
+    <p>In a terminal (PowerShell on Windows):</p>
+    <div class="codeblock">
+      <pre><code>git clone https://github.com/ainovo/extbrain-meta.git
+cd extbrain-meta
+npm install
+npm run prepare:ner
+npm run dev</code></pre>
+      <button type="button" class="copy-btn">Copy</button>
+    </div>
+    <p class="setup-note">
+      <code>prepare:ner</code> downloads the one-time NER weights (~1.4GB).
+      Then open <strong>http://localhost:5173</strong> — the API runs on :8080.
+    </p>
+
+    <h2>3. Make it yours</h2>
+    <p>
+      Star or fork the repo, bring your own model keys in Settings, and your
+      chats stay on your machine.
+    </p>
+    <a
+      class="gh-btn"
+      href="https://github.com/ainovo/extbrain-meta"
+      target="_blank"
+      rel="noopener"
+    >
+      <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+        <path
+          d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656"
+        />
+      </svg>
+      Star on GitHub
+    </a>
+    <p class="setup-note">
+      Prefer hosted NER/NLI over local models? Set
+      <code>MODAL_ANALYZE_URL</code> and <code>EXTBRAIN_API_SECRET</code> in a
+      server <code>.env</code> — see the repo README.
+    </p>
+  </main>
+
+  <footer class="site-foot">
+    <span>ExtBrain — the local, anti-RAG cure for AI amnesia. © 2026 Ainovo Co.</span>
+    <span class="foot-links">
+      <a href="./index.html">← Home</a>
+      <a href="https://extbrain.ai">Open the app →</a>
+    </span>
+  </footer>
+
+  <script>
+    // OS tabs (preselected from the visitor's platform).
+    const tabs = [...document.querySelectorAll(".setup-tab")];
+    function selectTab(os) {
+      for (const t of tabs) {
+        const on = t.dataset.os === os;
+        t.classList.toggle("on", on);
+        t.setAttribute("aria-selected", on ? "true" : "false");
+      }
+      document.getElementById("panel-mac").hidden = os !== "mac";
+      document.getElementById("panel-windows").hidden = os !== "windows";
+    }
+    for (const t of tabs) {
+      t.addEventListener("click", () => selectTab(t.dataset.os));
+    }
+    if (/win/i.test(navigator.platform || "")) selectTab("windows");
+
+    // Copy buttons.
+    for (const block of document.querySelectorAll(".codeblock")) {
+      const btn = block.querySelector(".copy-btn");
+      btn.addEventListener("click", async () => {
+        const text = block.querySelector("code").textContent;
+        try {
+          await navigator.clipboard.writeText(text);
+          btn.textContent = "Copied";
+          setTimeout(() => (btn.textContent = "Copy"), 1500);
+        } catch {
+          btn.textContent = "Select & copy";
+          setTimeout(() => (btn.textContent = "Copy"), 1500);
+        }
+      });
+    }
+  </script>
+</body>
+</html>

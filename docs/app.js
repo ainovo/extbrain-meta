@@ -1,8 +1,8 @@
 // ExtBrain landing: one random pitch section per visit.
 "use strict";
 
-/** Cloud Run app URL (TODO: fill in once the domain is live). */
-const APP_URL = "#";
+/** Hosted ExtBrain app URL. */
+const APP_URL = "https://extbrain.ai";
 
 const SECTIONS = [
   { id: "chats", label: "Chats" },
