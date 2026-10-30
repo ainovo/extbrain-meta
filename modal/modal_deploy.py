@@ -132,7 +132,7 @@ class ExtBrainEngine:
             all_candidate_labels,
             batch_size=64,
             multi_label=effective_multi_label,
-            hypothesis_template="This text is about {}",
+            hypothesis_template="The user's task or goal in this conversation is related to {}",
         )
         if isinstance(nli_outs, dict):
             nli_outs = [nli_outs]

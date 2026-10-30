@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ExtBrain — the local, anti-RAG cure for AI amnesia</title>
+  <meta
+    name="description"
+    content="ExtBrain turns your scattered AI chats into searchable memory: usage at a glance, auto-tagging, and answers by voice."
+  />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="site-nav">
+    <a class="brand" href="#" id="brand-home" aria-label="ExtBrain home">
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="#0064E0"
+        stroke-width="1.75"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path
+          d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"
+        />
+        <path
+          d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"
+        />
+      </svg>
+      <span>ExtBrain</span>
+    </a>
+    <a class="cta" id="nav-cta" href="#">Open ExtBrain</a>
+  </header>
+
+  <main class="stage">
+    <!-- Section 1: chat volume by AI -->
+    <section class="pitch" id="section-chats" data-section="chats" hidden>
+      <h1>Too much time with AIs to remember decisions?</h1>
+      <div class="demo-card">
+        <div class="demo-head">
+          <span>Chats per day, by AI · last 7 days</span>
+          <button type="button" class="replay" data-replay="chats">
+            Replay
+          </button>
+        </div>
+        <svg
+          id="chats-chart"
+          viewBox="0 0 720 440"
+          role="img"
+          aria-label="Animated stacked bar chart of daily chat counts for ChatGPT, Gemini, and Claude over the last 7 days"
+        ></svg>
+        <p class="sample-note">Sample data for illustration.</p>
+      </div>
+    </section>
+
+    <!-- Section 2: activity breakdown -->
+    <section class="pitch" id="section-activity" data-section="activity" hidden>
+      <h1>Did you know you chatted with them about ___?</h1>
+      <div class="demo-card">
+        <div class="demo-head">
+          <span>Time by category · last 30 days</span>
+          <button type="button" class="replay" data-replay="activity">
+            Replay
+          </button>
+        </div>
+        <div class="activity-demo" id="activity-demo" aria-hidden="true"></div>
+        <p class="sample-note">Sample data for illustration.</p>
+      </div>
+    </section>
+
+    <!-- Section 3: auto-tagging (draft) -->
+    <section class="pitch" id="section-tags" data-section="tags" hidden>
+      <h1>Your chats tag themselves.</h1>
+      <div class="demo-card">
+        <div class="demo-head">
+          <span>Auto-tagging as chats arrive</span>
+          <button type="button" class="replay" data-replay="tags">
+            Replay
+          </button>
+        </div>
+        <div class="tags-demo" id="tags-demo" aria-hidden="true"></div>
+        <p class="sample-note">Sample data for illustration.</p>
+      </div>
+    </section>
+
+    <!-- Section 4: voice Q&A (draft) -->
+    <section class="pitch" id="section-voice" data-section="voice" hidden>
+      <h1>Ask years of chats anything, out loud.</h1>
+      <div class="demo-card">
+        <div class="demo-head">
+          <span>Voice answers over your history</span>
+          <button type="button" class="replay" data-replay="voice">
+            Replay
+          </button>
+        </div>
+        <div class="voice-demo" id="voice-demo" aria-hidden="true"></div>
+        <p class="sample-note">Sample data for illustration.</p>
+      </div>
+    </section>
+
+    <!-- Section 5: instant summaries -->
+    <section class="pitch" id="section-summary" data-section="summary" hidden>
+      <h1>Instant TL;DRs, reports, and action items.</h1>
+      <div class="demo-card">
+        <div class="demo-head">
+          <span>One click, any template</span>
+          <button type="button" class="replay" data-replay="summary">
+            Replay
+          </button>
+        </div>
+        <div class="summary-demo" id="summary-demo" aria-hidden="true"></div>
+        <p class="sample-note">Sample data for illustration.</p>
+      </div>
+    </section>
+
+    <nav class="pager" aria-label="Sections">
+      <button type="button" class="page-arrow" id="page-prev" aria-label="Previous section">
+        &lt;
+      </button>
+      <div class="dots" id="pager-dots" role="tablist"></div>
+      <button type="button" class="page-arrow" id="page-next" aria-label="Next section">
+        &gt;
+      </button>
+    </nav>
+  </main>
+
+  <footer class="site-foot">
+    <span>ExtBrain — the local, anti-RAG cure for AI amnesia. © 2026 Ainovo Co.</span>
+    <a id="foot-cta" href="#">Open the app →</a>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>

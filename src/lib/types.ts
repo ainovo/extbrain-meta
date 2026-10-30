@@ -129,13 +129,14 @@ export const NER_BACKEND_OPTIONS: Array<{ id: NerBackendId; label: string }> = [
   },
 ];
 
-/** NLI backend: on-device mDeBERTa XNLI, or the Modal deployment. */
+/** NLI backend: on-device MiniLMv2 XNLI, or the Modal deployment. */
 export type NliBackendId = "local" | "modal";
 
 export const NLI_BACKEND_OPTIONS: Array<{ id: NliBackendId; label: string }> = [
   {
     id: "local",
-    label: "local - mdeberta-v3-base-xnli-multilingual-nli - based on microsoft/mdeberta-v3-base",
+    label:
+      "local - multilingual-MiniLMv2-L6-mnli-xnli - based on FacebookAI/xlm-roberta-base",
   },
   {
     id: "modal",

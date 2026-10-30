@@ -37,7 +37,7 @@ Technically, ExtBrain **is not a RAG** (Retrieval-Augmented Generation) system. 
 Instead of chunking text and using vector similarities to guess relevance, ExtBrain uses deterministic extraction and structuring:
 
 *   **On-Device NER (XLM-R) [Meta-based]:** Davlan XLM-RoBERTa-base NER — fine-tuned from Meta's FacebookAI/xlm-roberta-base — runs locally via quantized ONNX to extract people, organizations, places, and dates directly from raw messages.
-*   **On-Device NLI Tagging (mDeBERTa):** A multilingual mDeBERTa (Microsoft-based) zero-shot classifier scores Smart Tags and thread categories locally.
+*   **On-Device NLI Tagging (MiniLMv2):** A multilingual MiniLMv2 (Meta XLM-R-based) zero-shot classifier scores Smart Tags and thread categories locally.
 *   **Modal NER/NLI Option:** Settings offers a Modal-hosted backend (Davlan XLM-R NER + symanto XLM-R NLI) for massive chat repositories; the Load page processes through it when selected, otherwise the local models do the work.
 *   **Meta Muse Models:** Leverages Meta Muse models for highly accurate summarization and synthesis.
 *   **Bring-Your-Own-Key (BYOK):** Full flexibility to plug in your Meta model keys.

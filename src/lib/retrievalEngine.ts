@@ -7,7 +7,7 @@ import { estimateTokens } from "./takeoutParser";
 import { truncateAtWordBoundary } from "./entities";
 
 export const ZEROSHOT_MODEL_ID =
-  "onnx-community/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7-ONNX";
+  "onnx-community/multilingual-MiniLMv2-L6-mnli-xnli-ONNX";
 
 export function normalizeTagLabel(rawTag: string): string {
   return rawTag.replace(/^#+/, "").trim();
@@ -222,7 +222,7 @@ export async function loadZeroShotModel(
   if (zeroShotModelLoaded && zeroShotPipeline) return true;
 
   try {
-    onProgress?.(5, "Initializing mDeBERTa zero-shot model (checking Cache API)...");
+    onProgress?.(5, "Initializing MiniLMv2 zero-shot model (checking Cache API)...");
     const { pipeline, env } = await import("@huggingface/transformers");
     env.allowLocalModels = false;
     env.useBrowserCache = typeof caches !== "undefined";
@@ -256,7 +256,7 @@ export async function loadZeroShotModel(
     );
 
     zeroShotModelLoaded = true;
-    onProgress?.(100, "mDeBERTa zero-shot model ready.");
+    onProgress?.(100, "MiniLMv2 zero-shot model ready.");
     return true;
   } catch (err) {
     console.error("Failed to load zero-shot model in main thread:", err);
@@ -281,7 +281,8 @@ export async function classifySingleTextZeroShot(
   // Pass all target and contrast labels in a single batch array with multi_label=true
   const output: any = await zeroShotPipeline(text, cleanLabels, {
     multi_label: true,
-    hypothesis_template: "This text is about {}.",
+    hypothesis_template:
+      "The user's task or goal in this conversation is related to {}",
   });
 
   const single = Array.isArray(output) ? output[0] : output;

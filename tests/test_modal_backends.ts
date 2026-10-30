@@ -10,6 +10,7 @@ import {
   entityTextHash,
 } from "../src/lib/entities";
 import {
+  THREAD_CATEGORY_VERSION,
   buildThreadScoringText,
   threadNeedsCategoryScoring,
 } from "../src/lib/categoryTags";
@@ -159,7 +160,7 @@ async function runTests() {
       threadNeedsCategoryScoring({
         entry: {
           hash: h,
-          version: 3,
+          version: THREAD_CATEGORY_VERSION,
           scores: { finance: 1 },
           backend: "modal-bge-m3",
         },
@@ -173,7 +174,7 @@ async function runTests() {
   // --- Backend-aware staleness: categories ---
   const catEntry = (backend?: string) => ({
     hash: h,
-    version: 3,
+    version: THREAD_CATEGORY_VERSION,
     scores: { finance: 1 },
     ...(backend === undefined ? {} : { backend }),
   });
@@ -271,7 +272,7 @@ async function runTests() {
     {
       "thread-a": {
         hash: tHashA,
-        version: 3,
+        version: THREAD_CATEGORY_VERSION,
         scores: { finance: 1 },
         backend: "local",
       },

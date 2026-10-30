@@ -40,7 +40,14 @@ import {
   retryDelayMs,
 } from "../src/lib/synthesize";
 
-dotenv.config();
+// Absolute path: .env must load even when the server starts outside the
+// repo root (e.g. from modal/); a missing file is silently ignored.
+dotenv.config({
+  path: path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../.env"
+  ),
+});
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -149,7 +156,7 @@ async function getServerZeroShotClassifier() {
       env.allowLocalModels = false;
       serverZeroShotClassifier = await pipeline(
         "zero-shot-classification",
-        "onnx-community/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7-ONNX",
+        "onnx-community/multilingual-MiniLMv2-L6-mnli-xnli-ONNX",
         { dtype: "q8" }
       );
       return serverZeroShotClassifier;
@@ -435,7 +442,7 @@ app.post("/api/generate-nli-labels", async (req, res) => {
 
     const today = new Date().toISOString().slice(0, 10);
 
-    const systemPrompt = `You generate NLI zero-shot evaluation labels for mDeBERTa-v3-base-xnli (multilingual NLI).
+    const systemPrompt = `You generate NLI zero-shot evaluation labels for multilingual-MiniLMv2-L6-mnli-xnli (multilingual NLI).
 CRITICAL NLI RULE: If the user names a specific project, brand, or domain, the FIRST target_label MUST include that exact name (e.g. "user acquisition optimization for myhoros.com"), because chats explicitly about the project should match strongly. ALSO include 1-2 broader functional/topic phrases WITHOUT the brand/domain name, so follow-up turns that omit the name still match (scoring takes the best match across all labels).
 Return strict JSON only with "tag_name", "target_labels", "contrast_labels", "date_start", and "date_end".`;
 
@@ -539,7 +546,8 @@ app.post("/api/classify-entry", async (req, res) => {
     const clf = await getServerZeroShotClassifier();
     const out: any = await clf(text, cleanLabels, {
       multi_label: true,
-      hypothesis_template: "This text is about {}.",
+      hypothesis_template:
+        "The user's task or goal in this conversation is related to {}",
     });
     const single = Array.isArray(out) ? out[0] : out;
     const scoreMap: Record<string, number> = {};
@@ -601,7 +609,8 @@ app.post("/api/classify-batch", async (req, res) => {
     const clf = await getServerZeroShotClassifier();
     const opts = {
       multi_label: multi,
-      hypothesis_template: "This text is about {}.",
+      hypothesis_template:
+        "The user's task or goal in this conversation is related to {}",
     };
     const scoreOne = async (text: string): Promise<Record<string, number>> => {
       const out: any = await clf(text, cleanLabels, opts);

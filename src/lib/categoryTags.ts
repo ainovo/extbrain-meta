@@ -1,7 +1,8 @@
 /**
  * Category taxonomy for thread classification. Each thread is scored ONCE
  * against the one-word category names with the zero-shot NLI endpoint
- * ("This text is about {name}.") over its joined chat texts, and takes the
+ * ("The user's task or goal in this conversation is related to {name}")
+ * over its joined chat texts, and takes the
  * argmax category. One verdict per thread key persists per dataset
  * alongside entities; Top Threads reads it directly.
  *
@@ -87,8 +88,8 @@ export const CATEGORY_TAXONOMY: CategoryDef[] = [
  */
 export const CATEGORY_LABELS: string[] = CATEGORY_TAXONOMY.map((c) => c.id);
 
-/** Bump to invalidate stored verdicts (taxonomy or scorer change). */
-export const THREAD_CATEGORY_VERSION = 3;
+/** Bump to invalidate stored verdicts (taxonomy or scorer change). 5 = task-or-goal hypothesis template. */
+export const THREAD_CATEGORY_VERSION = 5;
 
 export type CategoryScores = Record<string, number>;
 
@@ -319,8 +320,8 @@ const RESERVED_CATEGORY_ID = "untagged";
 /**
  * Normalize a user-typed category name to a scoring id ("Machine Learning"
  * → "machine-learning"). Null when nothing usable remains or the id is
- * reserved. Ids stay template-safe for "This text is about {id}.":
- * lowercase alphanumerics plus dashes.
+ * reserved. Ids stay template-safe for "The user's task or goal in this
+ * conversation is related to {id}": lowercase alphanumerics plus dashes.
  */
 export function normalizeCategoryId(raw: string): string | null {
   const slug = raw
