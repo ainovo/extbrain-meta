@@ -119,6 +119,70 @@ export async function startVoiceRecording(): Promise<VoiceRecorder> {
   };
 }
 
+// ============================================================================
+// Endpointing: auto-stop when the user finishes speaking
+// ============================================================================
+
+/** Trailing silence that ends a turn (mid-sentence pauses are shorter). */
+export const VOICE_ENDPOINT_SILENCE_MS = 1800;
+/** No auto-stop before this long, so slow starts never cut off instantly. */
+export const VOICE_ENDPOINT_MIN_RECORD_MS = 1500;
+/** Mic level (0..1, same scale as VoiceRecorder.level) counting as speech. */
+export const VOICE_ENDPOINT_LEVEL_THRESHOLD = 0.08;
+
+export interface VoiceEndpointOptions {
+  silenceMs?: number;
+  minRecordMs?: number;
+  threshold?: number;
+}
+
+/**
+ * Trailing-silence endpoint detector. Feed live mic levels via update();
+ * it returns true once the user has spoken and then gone quiet for
+ * silenceMs. Sticky after detection. Pure logic (no DOM), so the
+ * component polls it alongside the elapsed timer.
+ */
+export class VoiceEndpointDetector {
+  private startMs: number;
+  private readonly silenceMs: number;
+  private readonly minRecordMs: number;
+  private readonly threshold: number;
+  private lastSpeechMs: number | null = null;
+  private detected = false;
+
+  constructor(startMs: number, options?: VoiceEndpointOptions) {
+    this.startMs = startMs;
+    this.silenceMs = options?.silenceMs ?? VOICE_ENDPOINT_SILENCE_MS;
+    this.minRecordMs = options?.minRecordMs ?? VOICE_ENDPOINT_MIN_RECORD_MS;
+    this.threshold = options?.threshold ?? VOICE_ENDPOINT_LEVEL_THRESHOLD;
+  }
+
+  /** Feed the current level at nowMs; true once the endpoint is reached. */
+  update(level: number, nowMs: number): boolean {
+    if (this.detected) return true;
+    if (level >= this.threshold) {
+      this.lastSpeechMs = nowMs;
+      return false;
+    }
+    // No speech yet: never stop (also covers a missing level tap, where
+    // level() always reads 0 — the turn falls back to manual/max stop).
+    if (this.lastSpeechMs === null) return false;
+    if (nowMs - this.startMs < this.minRecordMs) return false;
+    if (nowMs - this.lastSpeechMs >= this.silenceMs) {
+      this.detected = true;
+      return true;
+    }
+    return false;
+  }
+
+  /** Restart for a new turn. */
+  reset(startMs: number): void {
+    this.startMs = startMs;
+    this.lastSpeechMs = null;
+    this.detected = false;
+  }
+}
+
 /** Mono 16-bit PCM WAV writer (44-byte header + samples, little-endian). */
 export function encodeWavMono16(
   samples: Float32Array,

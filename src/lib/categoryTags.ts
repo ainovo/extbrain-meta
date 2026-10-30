@@ -16,7 +16,7 @@ import {
   setStoredItem,
 } from "./compressedJson";
 import { truncateAtWordBoundary } from "./entities";
-import { ParsedActivityItem } from "./types";
+import { NliBackendId, ParsedActivityItem } from "./types";
 
 /**
  * A category id: one of the 9 built-in ids below, or a user-added slug
@@ -97,6 +97,8 @@ export interface ThreadCategoryRecord {
   hash: string;
   version: number;
   scores: CategoryScores;
+  /** Backend that scored the verdict (absent = local, for legacy). */
+  backend?: NliBackendId;
 }
 
 export type ThreadCategoryMap = Record<string, ThreadCategoryRecord>;
@@ -213,10 +215,12 @@ export function threadNeedsCategoryScoring(args: {
   entry: unknown;
   hash: string;
   taxonomyIds?: string[];
+  backend?: NliBackendId;
 }): boolean {
   const rec = normalizeThreadCategoryRecord(args.entry);
   if (!rec) return true;
   if (rec.hash !== args.hash) return true;
+  if ((rec.backend ?? "local") !== (args.backend ?? "local")) return true;
   if (rec.version < THREAD_CATEGORY_VERSION) return true;
   for (const id of args.taxonomyIds ?? CATEGORY_LABELS) {
     if (typeof rec.scores[id] !== "number") return true;
@@ -244,15 +248,26 @@ export function normalizeThreadCategoryRecord(
   raw: unknown
 ): ThreadCategoryRecord | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const r = raw as { hash?: unknown; version?: unknown; scores?: unknown };
+  const r = raw as {
+    hash?: unknown;
+    version?: unknown;
+    scores?: unknown;
+    backend?: unknown;
+  };
   if (typeof r.hash !== "string") return null;
   const scores = normalizeScores(r.scores);
   if (!scores) return null;
-  return {
+  const rec: ThreadCategoryRecord = {
     hash: r.hash,
     version: typeof r.version === "number" ? r.version : 0,
     scores,
   };
+  // Legacy model-specific ids ("modal-bge-m3") are unrecognized, so
+  // pre-XLM verdicts never pass as fresh under the Modal backend.
+  if (r.backend === "local" || r.backend === "modal") {
+    rec.backend = r.backend;
+  }
+  return rec;
 }
 
 /** Validate a whole map (localStorage and backups share this). */

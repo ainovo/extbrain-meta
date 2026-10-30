@@ -3,6 +3,7 @@ import {
   encodeCompressedJson,
   setStoredItem,
 } from "./compressedJson";
+import type { NerBackendId } from "./types";
 
 export interface ExtractedEntity {
   /** Display form as found in the chat text. */
@@ -418,19 +419,32 @@ export interface ChatEntityHash {
   hash: string;
   /** Processor logic version (0 = unknown/legacy, always reprocessed). */
   version: number;
+  /** Backend that produced the entities (absent = local, for legacy). */
+  backend?: NerBackendId;
 }
 
 export type ChatEntityHashMap = Record<string, ChatEntityHash>;
 
+function normalizeHashBackend(raw: unknown): NerBackendId | undefined {
+  // Legacy model-specific ids ("modal-gliner") are unrecognized, so
+  // pre-XLM records never pass as fresh under the Modal backend.
+  return raw === "local" || raw === "modal"
+    ? (raw as NerBackendId)
+    : undefined;
+}
+
 function normalizeHashEntry(raw: unknown): ChatEntityHash | null {
   if (typeof raw === "string") return { hash: raw, version: 0 };
   if (raw && typeof raw === "object") {
-    const e = raw as { hash?: unknown; version?: unknown };
+    const e = raw as { hash?: unknown; version?: unknown; backend?: unknown };
     if (typeof e.hash === "string") {
-      return {
+      const entry: ChatEntityHash = {
         hash: e.hash,
         version: typeof e.version === "number" ? e.version : 0,
       };
+      const backend = normalizeHashBackend(e.backend);
+      if (backend !== undefined) entry.backend = backend;
+      return entry;
     }
   }
   return null;
@@ -464,19 +478,23 @@ export function saveChatEntityHashes(uuid: string, map: ChatEntityHashMap): bool
 
 /**
  * True when a chat needs (re-)processing: no entities stored, changed text,
- * no record at all, or a record from an older processor version. A null
- * server version (unreachable backend) skips the version check.
+ * no record at all, a record from an older processor version, or a record
+ * produced by a different backend (switching local/modal reprocesses).
+ * A null server version (unreachable backend) skips the version check.
+ * Records without a backend read as local (all legacy records are).
  */
 export function chatNeedsProcessing(args: {
   hasEntities: boolean;
   entry: unknown;
   hash: string;
   serverVersion: number | null;
+  backend?: NerBackendId;
 }): boolean {
   if (!args.hasEntities) return true;
   const norm = normalizeHashEntry(args.entry);
   if (!norm) return true;
   if (norm.hash !== args.hash) return true;
+  if ((norm.backend ?? "local") !== (args.backend ?? "local")) return true;
   if (args.serverVersion !== null && norm.version < args.serverVersion) {
     return true;
   }

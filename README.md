@@ -38,7 +38,7 @@ Instead of chunking text and using vector similarities to guess relevance, ExtBr
 
 *   **On-Device NER (XLM-R) [Meta-based]:** Davlan XLM-RoBERTa-base NER — fine-tuned from Meta's FacebookAI/xlm-roberta-base — runs locally via quantized ONNX to extract people, organizations, places, and dates directly from raw messages.
 *   **On-Device NLI Tagging (mDeBERTa):** A multilingual mDeBERTa (Microsoft-based) zero-shot classifier scores Smart Tags and thread categories locally.
-*   **Modal NER Option (planned):** Settings reserves a Modal-hosted GLiNER backend for massive chat repositories; it isn't wired up yet, so the local XLM-R model does the work.
+*   **Modal NER/NLI Option:** Settings offers a Modal-hosted backend (Davlan XLM-R NER + symanto XLM-R NLI) for massive chat repositories; the Load page processes through it when selected, otherwise the local models do the work.
 *   **Meta Muse Models:** Leverages Meta Muse models for highly accurate summarization and synthesis.
 *   **Bring-Your-Own-Key (BYOK):** Full flexibility to plug in your Meta model keys.
 

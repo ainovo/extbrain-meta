@@ -36,7 +36,6 @@ import { ActionItemsView } from "./components/ActionItemsView";
 import {
   DEFAULT_TAG_THRESHOLD,
   TagDef,
-  effectiveTagThreshold,
   loadTags,
   saveTags,
 } from "./lib/tags";
@@ -82,7 +81,6 @@ function localDayKey(iso: string): string {
 const ARCHIVE_SCROLL_TARGET = { day: null as string | null, nonce: 0 };
 const noopDayChange = (_day: string) => {};
 const noopTagToggle = (_id: string) => {};
-const noopThresholdChange = (_id: string, _v: number) => {};
 
 function formatDayLabel(dayKey: string): string {
   if (dayKey === "Unknown date") return dayKey;
@@ -387,22 +385,6 @@ export const App: React.FC = () => {
     );
   }, [items, focusedThread]);
 
-  // Best passing {target, contrast} score per chat across the active tags,
-  // so each card can show why it matched. Empty when no tag filter applies.
-  const activeScores = useMemo(() => {
-    if (activeTags.length === 0) return undefined;
-    const best: Record<string, { t: number; c: number }> = {};
-    for (const tag of activeTags) {
-      const th = effectiveTagThreshold(tag, taggingThreshold);
-      for (const [id, s] of Object.entries(tag.scores || {})) {
-        if (!(s.t >= th && s.t > s.c)) continue;
-        const cur = best[id];
-        if (!cur || s.t > cur.t) best[id] = { t: s.t, c: s.c };
-      }
-    }
-    return best;
-  }, [activeTags, tags, taggingThreshold]);
-
   const days = useMemo(() => {
     const map = new Map<string, number>();
     for (const it of visibleItems) {
@@ -579,6 +561,8 @@ export const App: React.FC = () => {
                 categoryMap={threadCategories}
                 onCategoriesChange={setThreadCategories}
                 taxonomy={taxonomy}
+                nerBackend={modelConfig.nerBackend ?? "local"}
+                nliBackend={modelConfig.nliBackend ?? "local"}
               />
             </div>
           )}
@@ -615,15 +599,11 @@ export const App: React.FC = () => {
               activeTags={activeTags.map((t) => ({
                 id: t.id,
                 name: t.name,
-                threshold: effectiveTagThreshold(t, taggingThreshold),
+                targetLabels: t.targetLabels,
+                contrastLabels: t.contrastLabels,
               }))}
               onToggleTag={(id) =>
                 setActiveTagIds((prev) => prev.filter((x) => x !== id))
-              }
-              onTagThresholdChange={(id, v) =>
-                setTags((prev) =>
-                  prev.map((t) => (t.id === id ? { ...t, threshold: v } : t))
-                )
               }
               onOpenThread={openThread}
               activeThreadKey={focusedThread}
@@ -635,7 +615,6 @@ export const App: React.FC = () => {
               synthesisModel={modelConfig.synthesis}
               maxTokensPerBatch={modelConfig.maxTokensPerSynthesisBatch}
               onOpenModelSettings={() => navigate("settings")}
-              matchScores={activeScores}
               minScore={modelConfig.nerScoreFloor ?? 0}
             />
           )}
@@ -694,7 +673,6 @@ export const App: React.FC = () => {
               onVisibleDayChange={noopDayChange}
               activeTags={[]}
               onToggleTag={noopTagToggle}
-              onTagThresholdChange={noopThresholdChange}
               onOpenThread={openThread}
               minScore={nerScoreFloor}
               archiveSummary
@@ -763,17 +741,19 @@ export const App: React.FC = () => {
       </div>
 
       <UrlPreviewLayer />
-      <VoiceAssistant
-        items={items}
-        entityMap={chatEntities}
-        voiceModel={
-          modelConfig.voice ?? {
-            provider: "meta",
-            model: DEFAULT_CONTRIBUTOR_MODEL,
+      {view === "top" && (
+        <VoiceAssistant
+          items={items}
+          entityMap={chatEntities}
+          voiceModel={
+            modelConfig.voice ?? {
+              provider: "meta",
+              model: DEFAULT_CONTRIBUTOR_MODEL,
+            }
           }
-        }
-        minScore={nerScoreFloor}
-      />
+          minScore={nerScoreFloor}
+        />
+      )}
     </div>
   );
 };

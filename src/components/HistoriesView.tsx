@@ -10,9 +10,10 @@ import {
   MessagesSquare,
   ExternalLink,
   CalendarDays,
+  ChevronDown,
   X,
 } from "lucide-react";
-import { displayTagName } from "../lib/tags";
+import { describeTagFilter, displayTagName } from "../lib/tags";
 import {
   DEFAULT_MAX_TOKENS_PER_BATCH,
   ModelEndpointConfig,
@@ -80,12 +81,8 @@ function highlightText(text: string, tokens: string[]): React.ReactNode {
 export interface ActiveTagInfo {
   id: string;
   name: string;
-  threshold: number;
-}
-
-export interface TagScore {
-  t: number;
-  c: number;
+  targetLabels: string[];
+  contrastLabels: string[];
 }
 
 interface Props {
@@ -105,7 +102,6 @@ interface Props {
   onVisibleDayChange: (dayKey: string) => void;
   activeTags: ActiveTagInfo[];
   onToggleTag: (id: string) => void;
-  onTagThresholdChange: (id: string, v: number) => void;
   activeEntities: string[];
   onToggleEntity: (key: string) => void;
   activeDateRange?: { start: string; end: string } | null;
@@ -118,7 +114,6 @@ interface Props {
   synthesisModel?: ModelEndpointConfig;
   maxTokensPerBatch?: number;
   onOpenModelSettings?: () => void;
-  matchScores?: Record<string, TagScore>;
   minScore?: number;
 }
 
@@ -165,42 +160,6 @@ function renderPromptText(text: string, tokens: string[]): React.ReactNode {
   );
 }
 
-function TagThresholdControl({
-  tagName,
-  value,
-  onChange,
-}: {
-  tagName: string;
-  value: number;
-  onChange: (v: number) => void;
-}) {
-  const [active, setActive] = useState(false);
-  return (
-    <label className="relative flex items-center w-full cursor-pointer">
-      <input
-        type="range"
-        min={0}
-        max={1}
-        step={0.05}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        onPointerDown={() => setActive(true)}
-        onPointerUp={() => setActive(false)}
-        onPointerCancel={() => setActive(false)}
-        onFocus={() => setActive(true)}
-        onBlur={() => setActive(false)}
-        className="w-full accent-action"
-        aria-label={`${tagName} threshold`}
-      />
-      {active && (
-        <span className="pointer-events-none absolute left-1/2 -translate-x-1/2 rounded-md bg-ink px-1.5 py-0.5 font-mono text-[10px] leading-tight text-white shadow">
-          {value.toFixed(2)}
-        </span>
-      )}
-    </label>
-  );
-}
-
 function scrollToChat(id: string) {
   requestAnimationFrame(() => {
     let el: HTMLElement | null = null;
@@ -234,13 +193,11 @@ function ThreadEntityPill({
 export const ChatCard = React.memo(function ChatCard({
   item,
   highlightTokens,
-  matchScore,
   thread,
   onOpenThread,
 }: {
   item: ParsedActivityItem;
   highlightTokens: string[];
-  matchScore?: TagScore;
   thread?: { key: string; size: number };
   onOpenThread?: (key: string) => void;
 }) {
@@ -280,11 +237,6 @@ export const ChatCard = React.memo(function ChatCard({
           )}
         </div>
       ))}
-      {matchScore && (
-        <div className="text-[11px] font-mono text-mention">
-          Target {Math.round(matchScore.t * 100)}% · Contrast {Math.round(matchScore.c * 100)}%
-        </div>
-      )}
     </div>
   );
 });
@@ -302,7 +254,6 @@ export const HistoriesView: React.FC<Props> = ({
   onVisibleDayChange,
   activeTags,
   onToggleTag,
-  onTagThresholdChange,
   activeEntities,
   onToggleEntity,
   activeDateRange,
@@ -315,16 +266,18 @@ export const HistoriesView: React.FC<Props> = ({
   synthesisModel,
   maxTokensPerBatch,
   onOpenModelSettings,
-  matchScores,
   minScore = 0,
 }) => {
   const [renderCount, setRenderCount] = useState(PAGE_SIZE);
   const [pendingScrollId, setPendingScrollId] = useState<string | null>(null);
   const [showAllThreadEntities, setShowAllThreadEntities] = useState(false);
+  const [showTagDetails, setShowTagDetails] = useState(false);
   const [pillFitCount, setPillFitCount] = useState(MAX_VISIBLE_PILLS);
   const pillRowRef = useRef<HTMLDivElement | null>(null);
   const pillMeasureRef = useRef<HTMLDivElement | null>(null);
   const pillPanelRef = useRef<HTMLDivElement | null>(null);
+  const tagPanelRef = useRef<HTMLDivElement | null>(null);
+  const tagToggleRef = useRef<HTMLButtonElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
 
@@ -479,6 +432,69 @@ export const HistoriesView: React.FC<Props> = ({
     };
   }, [showAllThreadEntities]);
 
+  // Tag-filtered list header: the tag name(s) replace the generic title,
+  // with one match/exclude bullet per tag in the subtitle.
+  const tagHeader = useMemo(() => describeTagFilter(activeTags), [activeTags]);
+  // Details dropdown shows one merged Match/Exclude list across every
+  // active tag (deduped, first-seen order).
+  const tagDetailLabels = useMemo(() => {
+    const targets: string[] = [];
+    const contrasts: string[] = [];
+    for (const e of tagHeader.entries) {
+      for (const l of e.targetLabels) {
+        if (!targets.includes(l)) targets.push(l);
+      }
+      for (const l of e.contrastLabels) {
+        if (!contrasts.includes(l)) contrasts.push(l);
+      }
+    }
+    return { targets, contrasts };
+  }, [tagHeader]);
+  // Stable identity for the filter set (the activeTags array itself is
+  // rebuilt every render): keys the summary scope and the details panel.
+  const tagFilterKey = useMemo(
+    () =>
+      activeTags
+        .map((t) => t.id)
+        .sort()
+        .join("\n"),
+    [activeTags]
+  );
+  // The tag-details dropdown floats over the list too: outside taps, page
+  // scroll, and Escape dismiss it; scrolling inside it does not.
+  useEffect(() => {
+    if (!showTagDetails) return;
+    const onDown = (e: MouseEvent) => {
+      if (tagPanelRef.current?.contains(e.target as Node)) return;
+      if (tagToggleRef.current?.contains(e.target as Node)) return;
+      setShowTagDetails(false);
+    };
+    const onScroll = (e: Event) => {
+      if (tagPanelRef.current?.contains(e.target as Node)) return;
+      setShowTagDetails(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowTagDetails(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("scroll", onScroll, {
+      capture: true,
+      passive: true,
+    });
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("scroll", onScroll, { capture: true });
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [showTagDetails]);
+
+  // A changed filter set closes the details dropdown: stale bullets must
+  // not linger over the new list.
+  useEffect(() => {
+    setShowTagDetails(false);
+  }, [tagFilterKey]);
+
   // The subtitle pill row always stays one line: pills keep full width
   // and hide from the right one by one as the row narrows. A hidden
   // measurer sizes every pill, then the row shows the largest fitting
@@ -570,6 +586,21 @@ export const HistoriesView: React.FC<Props> = ({
     onOpenModelSettings: onOpenModelSettings ?? (() => {}),
   });
 
+  // Tag-filter copy of the thread summary: same button/panel UX over the
+  // filtered list, scoped under the sorted filter set.
+  const tagSummaryApi = useThreadSummary({
+    threadKey: `tag:${tagFilterKey.replace(/\n/g, "+")}`,
+    threadTitle: tagHeader.title || "Tag",
+    uuid: uuid ?? "local",
+    items: ordered,
+    synthesisModel: synthesisModel ?? {
+      provider: "meta",
+      model: "",
+    },
+    maxTokensPerBatch: maxTokensPerBatch ?? DEFAULT_MAX_TOKENS_PER_BATCH,
+    onOpenModelSettings: onOpenModelSettings ?? (() => {}),
+  });
+
   return (
     <div>
       <div className="sticky top-12 md:top-0 z-10 bg-canvas/95 backdrop-blur px-1 py-2 -mt-2 flex flex-wrap items-center gap-3">
@@ -581,12 +612,72 @@ export const HistoriesView: React.FC<Props> = ({
               <MarkdownInline markdown={activeThreadTitle || "Thread"} />
             </h2>
           ) : (
-            <h2 className="text-lg sm:text-2xl font-bold tracking-tight text-ink leading-tight">{title}</h2>
+            <h2 className="text-lg sm:text-2xl font-bold tracking-tight text-ink leading-tight truncate">
+              {activeTags.length > 0 ? tagHeader.title : title}
+            </h2>
           )}
           <div className="flex items-center gap-2 mt-1 min-w-0 relative overflow-hidden">
             <p className="text-[13px] text-mention shrink-0">
               {ordered.length} of {totalCount} chats
             </p>
+            {!isThreadView && activeTags.length > 0 && (
+              <>
+                <div className="flex items-center gap-1.5 min-w-0 text-[13px] text-mention overflow-hidden">
+                  {tagHeader.entries.map((e, ei) => (
+                    <React.Fragment key={e.tagId}>
+                      {ei > 0 && (
+                        <span aria-hidden className="text-mention/40 select-none shrink-0">·</span>
+                      )}
+                      {tagHeader.entries.length > 1 && (
+                        <span className="font-medium text-ink whitespace-nowrap shrink-0">
+                          {displayTagName(e.tagName)}
+                        </span>
+                      )}
+                      {e.match !== null && (
+                        <span className="inline-flex items-center gap-1 min-w-0 shrink-0">
+                          <span className="font-medium text-ink">Match</span>
+                          <span aria-hidden className="text-mention/60 select-none">•</span>
+                          <span className="truncate max-w-40" title={e.match}>
+                            {e.match}
+                          </span>
+                        </span>
+                      )}
+                      {e.match !== null && e.exclude !== null && (
+                        <span aria-hidden className="text-mention/40 select-none shrink-0">·</span>
+                      )}
+                      {e.exclude !== null && (
+                        <span className="inline-flex items-center gap-1 min-w-0 shrink-0">
+                          <span className="font-medium">Exclude</span>
+                          <span aria-hidden className="text-mention/60 select-none">•</span>
+                          <span className="truncate max-w-40" title={e.exclude}>
+                            {e.exclude}
+                          </span>
+                        </span>
+                      )}
+                    </React.Fragment>
+                  ))}
+                </div>
+                {/* Sibling of the clipping row above (not inside it): only
+                    the bullets truncate on narrow screens, the expander
+                    itself always stays visible. */}
+                {tagHeader.hiddenCount > 0 && (
+                  <button
+                    ref={tagToggleRef}
+                    type="button"
+                    onClick={() => setShowTagDetails((v) => !v)}
+                    aria-expanded={showTagDetails}
+                    className="inline-flex items-center gap-0.5 rounded-full bg-tag px-2 py-0.5 text-[11px] text-mention hover:text-ink hover:bg-divider transition whitespace-nowrap shrink-0"
+                  >
+                    {showTagDetails
+                      ? "Show less"
+                      : `+${tagHeader.hiddenCount} more`}
+                    <ChevronDown
+                      className={`w-3 h-3 transition-transform ${showTagDetails ? "rotate-180" : ""}`}
+                    />
+                  </button>
+                )}
+              </>
+            )}
             {isThreadView && threadEntities.length > 0 && (
               <div
                 ref={pillRowRef}
@@ -713,28 +804,22 @@ export const HistoriesView: React.FC<Props> = ({
           </>
         )}
         {/* Tag filters are sticky: they narrow the thread review too, so
-            the pills stay visible (and removable) in the thread view.
-            Entity and date facets are bypassed there, so theirs stay
-            hidden. */}
-        {activeTags.length > 0 && (
-          <div className="flex items-start gap-3 min-w-0 overflow-x-auto">
+            the pills stay visible (and removable) in the thread view, whose
+            title belongs to the thread. In the list the tag name is the
+            title instead, so no pills. Thresholds live in Settings now. */}
+        {isThreadView && activeTags.length > 0 && (
+          <div className="flex items-center gap-1.5 min-w-0 overflow-x-auto shrink-0">
             {activeTags.map((t) => (
-              <div key={t.id} className="flex w-fit shrink-0 flex-col gap-1">
-                <button
-                  type="button"
-                  onClick={() => onToggleTag(t.id)}
-                  title="Remove this tag from the filter"
-                  className="inline-flex items-center justify-center gap-1.5 rounded-full bg-action px-3 py-1 text-xs font-medium text-white hover:bg-action-hover transition-colors"
-                >
-                  {displayTagName(t.name)}
-                  <X className="w-3 h-3 opacity-60" />
-                </button>
-                <TagThresholdControl
-                  tagName={t.name}
-                  value={t.threshold}
-                  onChange={(v) => onTagThresholdChange(t.id, v)}
-                />
-              </div>
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => onToggleTag(t.id)}
+                title="Remove this tag from the filter"
+                className="inline-flex items-center justify-center gap-1.5 rounded-full bg-action px-3 py-1 text-xs font-medium text-white hover:bg-action-hover transition-colors shrink-0"
+              >
+                {displayTagName(t.name)}
+                <X className="w-3 h-3 opacity-60" />
+              </button>
             ))}
           </div>
         )}
@@ -744,6 +829,12 @@ export const HistoriesView: React.FC<Props> = ({
           // on-screen when the button wraps to its own row.
           <div className="ml-auto shrink-0">
             <ThreadSummaryButton api={archiveSummaryApi} />
+          </div>
+        )}
+        {!isThreadView && activeTags.length > 0 && synthesisModel && (
+          // Same right-aligned placement as the archive summary button.
+          <div className="ml-auto shrink-0">
+            <ThreadSummaryButton api={tagSummaryApi} />
           </div>
         )}
         {isThreadView &&
@@ -764,9 +855,69 @@ export const HistoriesView: React.FC<Props> = ({
               </div>
             </div>
           )}
+        {!isThreadView && showTagDetails && activeTags.length > 0 && (
+          <div
+            ref={tagPanelRef}
+            className="absolute left-0 top-full z-30 mt-1 w-[min(28rem,calc(100vw-2rem))] rounded-xl border border-divider bg-white shadow-lg p-4 max-h-80 overflow-y-auto overscroll-contain space-y-4"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-ink">
+                Tag details
+              </span>
+              <span className="flex-1" />
+              <button
+                type="button"
+                onClick={() => setShowTagDetails(false)}
+                title="Close tag details"
+                aria-label="Close tag details"
+                className="rounded-md p-1 text-mention/60 hover:text-mention hover:bg-tag shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-mention/60">
+                Match
+              </div>
+              <ul className="mt-1 space-y-1">
+                {tagDetailLabels.targets.length > 0 ? (
+                  tagDetailLabels.targets.map((label, i) => (
+                    <li
+                      key={`${i}-${label}`}
+                      className="flex gap-1.5 text-xs leading-snug text-mention"
+                    >
+                      <span aria-hidden className="text-mention/60 select-none">•</span>
+                      <span>{label}</span>
+                    </li>
+                  ))
+                ) : (
+                  <li className="text-xs text-mention/60">—</li>
+                )}
+              </ul>
+            </div>
+            {tagDetailLabels.contrasts.length > 0 && (
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-mention/60">
+                  Exclude
+                </div>
+                <ul className="mt-1 space-y-1">
+                  {tagDetailLabels.contrasts.map((label, i) => (
+                    <li
+                      key={`${i}-${label}`}
+                      className="flex gap-1.5 text-xs leading-snug text-mention"
+                    >
+                      <span aria-hidden className="text-mention/60 select-none">•</span>
+                      <span>{label}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
-      {!isThreadView && (
+      {!isThreadView && activeTags.length === 0 && (
         <div className="px-1 sm:px-4 pt-3">
           <MentionSearchBar
             key={activeEntities.join("\n")}
@@ -793,6 +944,12 @@ export const HistoriesView: React.FC<Props> = ({
         </div>
       )}
 
+      {!isThreadView && activeTags.length > 0 && synthesisModel && (
+        <div className="px-1 sm:px-4 pt-3">
+          <ThreadSummaryPanel api={tagSummaryApi} />
+        </div>
+      )}
+
       <div className="px-1 sm:px-4 py-4">
         <div ref={listRef} className="w-full space-y-7">
           {rendered.map((item) => {
@@ -814,7 +971,6 @@ export const HistoriesView: React.FC<Props> = ({
                   <ChatCard
                     item={item}
                     highlightTokens={EMPTY_TOKENS}
-                    matchScore={matchScores?.[item.id]}
                     thread={!isThreadView && tkey && tsize > 1 ? { key: tkey, size: tsize } : undefined}
                     onOpenThread={onOpenThread}
                   />

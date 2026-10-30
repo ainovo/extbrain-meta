@@ -27,6 +27,14 @@ import {
   normalizeZeroShotBatch,
 } from "../src/lib/retrievalEngine";
 import {
+  buildModalNerBody,
+  buildModalNliBody,
+  mapModalEntities,
+  mapModalScores,
+  normalizeModalResults,
+  type ModalAnalyzeBody,
+} from "../src/lib/modalBackend";
+import {
   extractionConcurrencyFor,
   mapWithConcurrency,
   retryDelayMs,
@@ -242,13 +250,96 @@ async function getServerNerExtractor() {
   return serverNerLoadingPromise;
 }
 
+/**
+ * Modal-hosted NER+NLI (modal/modal_deploy.py /analyze). Config lives only
+ * in the server .env: MODAL_ANALYZE_URL is the full deployed endpoint URL
+ * (including /analyze) and EXTBRAIN_API_SECRET must match the value in the
+ * Modal extbrain-auth secret (same name both sides; legacy MODAL_API_SECRET
+ * still works as a fallback). Neither value ever reaches the client.
+ */
+function modalConfig(): { url: string; secret: string } {
+  return {
+    url: (process.env.MODAL_ANALYZE_URL || "").trim().replace(/\/+$/, ""),
+    secret: (
+      process.env.EXTBRAIN_API_SECRET ||
+      process.env.MODAL_API_SECRET ||
+      ""
+    ).trim(),
+  };
+}
+
+function modalReady(): boolean {
+  const { url, secret } = modalConfig();
+  return url.length > 0 && secret.length > 0;
+}
+
+/**
+ * Processor version for Modal NER. Separate space from the local
+ * NER_EXTRACTOR_VERSION (records also stamp which backend produced them,
+ * so switching backends reprocesses regardless of numbers). Bump when the
+ * NER logic in modal/modal_deploy.py changes.
+ */
+const MODAL_NER_EXTRACTOR_VERSION = 1;
+
+async function callModalAnalyze(body: ModalAnalyzeBody): Promise<unknown[]> {
+  const { url, secret } = modalConfig();
+  if (!url || !secret) {
+    throw new Error(
+      "Modal backend selected but the server has no MODAL_ANALYZE_URL / EXTBRAIN_API_SECRET configured (server .env)."
+    );
+  }
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-ExtBrain-Secret": secret,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    throw new Error(
+      `Modal /analyze failed (${resp.status}): ${(await resp.text()).slice(0, 300)}`
+    );
+  }
+  const data = (await resp.json()) as { results?: unknown };
+  if (!Array.isArray(data.results)) {
+    throw new Error(
+      "Modal /analyze returned an unexpected shape (missing results array)."
+    );
+  }
+  return data.results;
+}
+
 app.post("/api/extract-entities-batch", async (req, res) => {
   try {
-    const { items } = req.body as {
+    const { items, backend } = req.body as {
       items: Array<{ id: string; text: string }>;
+      backend?: string;
     };
     if (!items || items.length === 0) {
       res.json({ results: [] });
+      return;
+    }
+
+    // Legacy "modal-gliner" tolerated for in-flight clients mid-upgrade.
+    if (backend === "modal" || backend === "modal-gliner") {
+      const normalized = normalizeModalResults(
+        await callModalAnalyze(
+          buildModalNerBody(items.map((e) => e.text || ""))
+        ),
+        items.length
+      );
+      if (!normalized) {
+        throw new Error(
+          `Modal /analyze returned a misaligned batch for ${items.length} texts.`
+        );
+      }
+      res.json({
+        results: items.map((entry, i) => ({
+          id: entry.id,
+          entities: mapModalEntities(normalized[i].entities),
+        })),
+      });
       return;
     }
 
@@ -466,10 +557,11 @@ app.post("/api/classify-entry", async (req, res) => {
 
 app.post("/api/classify-batch", async (req, res) => {
   try {
-    const { items, labels, multiLabel } = req.body as {
+    const { items, labels, multiLabel, backend } = req.body as {
       items: Array<{ id: string; text: string }>;
       labels: string[];
       multiLabel?: boolean;
+      backend?: string;
     };
     const cleanLabels = (labels || []).map((l) => l.trim()).filter(Boolean);
     if (!items || items.length === 0 || cleanLabels.length === 0) {
@@ -479,6 +571,32 @@ app.post("/api/classify-batch", async (req, res) => {
     // Tags score target/contrast labels independently (multi-label); the
     // category taxonomy picks exactly one label (softmaxed single-label).
     const multi = multiLabel !== false;
+
+    // Legacy "modal-bge-m3" tolerated for in-flight clients mid-upgrade.
+    if (backend === "modal" || backend === "modal-bge-m3") {
+      const normalized = normalizeModalResults(
+        await callModalAnalyze(
+          buildModalNliBody(
+            items.map((e) => e.text || ""),
+            cleanLabels,
+            multi
+          )
+        ),
+        items.length
+      );
+      if (!normalized) {
+        throw new Error(
+          `Modal /analyze returned a misaligned batch for ${items.length} texts.`
+        );
+      }
+      res.json({
+        results: items.map((entry, i) => ({
+          id: entry.id,
+          scores: mapModalScores(normalized[i].scores, cleanLabels),
+        })),
+      });
+      return;
+    }
 
     const clf = await getServerZeroShotClassifier();
     const opts = {
@@ -538,6 +656,8 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     nerExtractorVersion: NER_EXTRACTOR_VERSION,
+    modalNerVersion: MODAL_NER_EXTRACTOR_VERSION,
+    modalReady: modalReady(),
     hasServerMetaKey: Boolean(process.env.MODEL_API_KEY),
   });
 });

@@ -202,8 +202,16 @@ export function normalizeModelConfig(raw: unknown): DualModelConfig {
     maxTokensPerSynthesisBatch: maxTokens,
     zeroShotThreshold: threshold,
     ...(nerFloor !== undefined ? { nerScoreFloor: nerFloor } : {}),
-    nerBackend: r.nerBackend === "modal-gliner" ? "modal-gliner" : "local",
-    nliBackend: r.nliBackend === "modal-tbd" ? "modal-tbd" : "local",
+    // Legacy model-specific ids migrate forward to "modal" (keeps the
+    // user's selection); "modal-tbd" was never wired, so it fails to local.
+    nerBackend:
+      r.nerBackend === "modal" || r.nerBackend === "modal-gliner"
+        ? "modal"
+        : "local",
+    nliBackend:
+      r.nliBackend === "modal" || r.nliBackend === "modal-bge-m3"
+        ? "modal"
+        : "local",
     mentionMinChats:
       typeof r.mentionMinChats === "number" && Number.isFinite(r.mentionMinChats)
         ? Math.min(Math.max(Math.round(r.mentionMinChats), 1), 50)

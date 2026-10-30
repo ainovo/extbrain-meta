@@ -1,4 +1,4 @@
-import { ParsedActivityItem } from "./types";
+import { NerBackendId, NliBackendId, ParsedActivityItem } from "./types";
 import { buildEntryClassificationText } from "./retrievalEngine";
 import {
   ChatEntityHashMap,
@@ -50,6 +50,10 @@ export interface ProcessStartArgs {
   serverVersion: number | null;
   /** Taxonomy in force for category scoring (defaults to the built-ins). */
   taxonomy?: CategoryDef[];
+  /** NER backend for this run (defaults to local). */
+  nerBackend?: NerBackendId;
+  /** NLI backend for category scoring (defaults to local). */
+  nliBackend?: NliBackendId;
   microBatch?: number;
   onBatch: (merged: ChatEntityMap, batchHashes: ChatEntityHashMap) => void;
   onCategories: (merged: ThreadCategoryMap) => void;
@@ -110,7 +114,8 @@ function processQueueEntryFor(
   it: ParsedActivityItem,
   baseMap: ChatEntityMap,
   baseHashes: ChatEntityHashMap,
-  serverVersion: number | null
+  serverVersion: number | null,
+  nerBackend: NerBackendId = "local"
 ): QueuedChat | null {
   const { text, hash } = nerTextAndHash(it);
   if (
@@ -119,6 +124,7 @@ function processQueueEntryFor(
       entry: baseHashes[it.id],
       hash,
       serverVersion,
+      backend: nerBackend,
     })
   ) {
     return null;
@@ -143,11 +149,18 @@ export function buildProcessQueue(
   items: ParsedActivityItem[],
   baseMap: ChatEntityMap,
   baseHashes: ChatEntityHashMap,
-  serverVersion: number | null
+  serverVersion: number | null,
+  nerBackend: NerBackendId = "local"
 ): ProcessQueueItem[] {
   const queue: QueuedChat[] = [];
   for (const it of items) {
-    const entry = processQueueEntryFor(it, baseMap, baseHashes, serverVersion);
+    const entry = processQueueEntryFor(
+      it,
+      baseMap,
+      baseHashes,
+      serverVersion,
+      nerBackend
+    );
     if (entry) queue.push(entry);
   }
   sortQueueNewestFirst(queue);
@@ -164,7 +177,8 @@ export function buildProcessQueue(
 function categoryQueueEntryFor(
   t: ThreadSummary,
   baseThreadCategories: ThreadCategoryMap,
-  taxonomyIds: string[]
+  taxonomyIds: string[],
+  nliBackend: NliBackendId = "local"
 ): ProcessQueueItem | null {
   const text = buildThreadScoringText(t.chats);
   const hash = entityTextHash(text);
@@ -173,6 +187,7 @@ function categoryQueueEntryFor(
       entry: baseThreadCategories[t.key],
       hash,
       taxonomyIds,
+      backend: nliBackend,
     })
   ) {
     return null;
@@ -183,11 +198,17 @@ function categoryQueueEntryFor(
 export function buildThreadCategoryQueue(
   items: ParsedActivityItem[],
   baseThreadCategories: ThreadCategoryMap,
-  taxonomyIds: string[] = CATEGORY_LABELS
+  taxonomyIds: string[] = CATEGORY_LABELS,
+  nliBackend: NliBackendId = "local"
 ): ProcessQueueItem[] {
   const queue: ProcessQueueItem[] = [];
   for (const t of summarizeThreads(items)) {
-    const entry = categoryQueueEntryFor(t, baseThreadCategories, taxonomyIds);
+    const entry = categoryQueueEntryFor(
+      t,
+      baseThreadCategories,
+      taxonomyIds,
+      nliBackend
+    );
     if (entry) queue.push(entry);
   }
   return queue;
@@ -210,12 +231,20 @@ export async function buildProcessQueuesAsync(
   baseHashes: ChatEntityHashMap,
   serverVersion: number | null,
   baseThreadCategories: ThreadCategoryMap,
-  opts?: { chunk?: number; isCancelled?: () => boolean; taxonomyIds?: string[] }
+  opts?: {
+    chunk?: number;
+    isCancelled?: () => boolean;
+    taxonomyIds?: string[];
+    nerBackend?: NerBackendId;
+    nliBackend?: NliBackendId;
+  }
 ): Promise<ProcessQueues> {
   const empty: ProcessQueues = { ner: [], cats: [] };
   const chunk = Math.max(1, opts?.chunk ?? 500);
   const isCancelled = opts?.isCancelled ?? (() => false);
   const taxonomyIds = opts?.taxonomyIds ?? CATEGORY_LABELS;
+  const nerBackend = opts?.nerBackend ?? "local";
+  const nliBackend = opts?.nliBackend ?? "local";
   const nerQueue: QueuedChat[] = [];
   for (let i = 0; i < items.length; i += chunk) {
     if (isCancelled()) return empty;
@@ -225,7 +254,8 @@ export async function buildProcessQueuesAsync(
         items[j],
         baseMap,
         baseHashes,
-        serverVersion
+        serverVersion,
+        nerBackend
       );
       if (entry) nerQueue.push(entry);
     }
@@ -242,7 +272,8 @@ export async function buildProcessQueuesAsync(
       const entry = categoryQueueEntryFor(
         threads[j],
         baseThreadCategories,
-        taxonomyIds
+        taxonomyIds,
+        nliBackend
       );
       if (entry) cats.push(entry);
     }
@@ -313,11 +344,14 @@ class EntityProcessRunner {
   /** False when a run is already active (caller should stop it first). */
   start(args: ProcessStartArgs): boolean {
     if (this.status === "running") return false;
+    const nerBackend = args.nerBackend ?? "local";
+    const nliBackend = args.nliBackend ?? "local";
     const queue = buildProcessQueue(
       args.items,
       args.baseMap,
       args.baseHashes,
-      args.serverVersion
+      args.serverVersion,
+      nerBackend
     );
     // Thread verdicts are independent of NER: one scoring call per
     // thread, whatever its entity state.
@@ -325,7 +359,8 @@ class EntityProcessRunner {
     const catQueue = buildThreadCategoryQueue(
       args.items,
       args.baseThreadCategories,
-      taxonomy.map((c) => c.id)
+      taxonomy.map((c) => c.id),
+      nliBackend
     );
     this.error = null;
     if (queue.length === 0 && catQueue.length === 0) {
@@ -374,7 +409,10 @@ class EntityProcessRunner {
         const resp = await fetch("/api/extract-entities-batch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: slice }),
+          body: JSON.stringify({
+            items: slice,
+            backend: args.nerBackend ?? "local",
+          }),
           signal: controller.signal,
         });
         if (!alive()) return;
@@ -390,6 +428,7 @@ class EntityProcessRunner {
             hash: s.hash,
             version:
               args.serverVersion ?? args.baseHashes[s.id]?.version ?? 0,
+            backend: args.nerBackend ?? "local",
           };
         }
         for (const r of data.results || []) {
@@ -430,6 +469,7 @@ class EntityProcessRunner {
             // One category per thread: softmax the labels, don't score
             // each independently.
             multiLabel: false,
+            backend: args.nliBackend ?? "local",
           }),
           signal: controller.signal,
         });
@@ -449,6 +489,7 @@ class EntityProcessRunner {
             hash,
             version: THREAD_CATEGORY_VERSION,
             scores: scoresToCategories(r.scores || {}, taxonomy),
+            backend: args.nliBackend ?? "local",
           };
         }
         cats = { ...cats };

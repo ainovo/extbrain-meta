@@ -10,7 +10,7 @@
     "build": "tsc -b && vite build",
     "prepare:ner": "python3 scripts/prepare_xlm_ner.py",
     "start": "tsx server/index.ts",
-    "test": "tsx tests/test_parser_packer.ts"
+    "test": "tsx tests/test_parser_packer.ts && tsx tests/test_voice_endpoint.ts && tsx tests/test_tag_filter_display.ts && tsx tests/test_modal_backends.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",

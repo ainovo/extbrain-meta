@@ -142,3 +142,57 @@ export function formatEstimate(chatCount: number): string {
 export function displayTagName(name: string): string {
   return name.startsWith("#") ? name : `#${name}`;
 }
+
+export interface TagFilterHeaderEntry {
+  tagId: string;
+  tagName: string;
+  /** First target label, or null when the tag has none. */
+  match: string | null;
+  /** First contrast label, or null when the tag excludes nothing. */
+  exclude: string | null;
+  targetLabels: string[];
+  contrastLabels: string[];
+}
+
+export interface TagFilterHeader {
+  /** Page title for the filtered list: "" / "#a" / "#a + #b". */
+  title: string;
+  entries: TagFilterHeaderEntry[];
+  /** Labels hidden behind the expander (total minus shown bullets). */
+  hiddenCount: number;
+}
+
+/**
+ * Header model for the tag-filtered chats page: the tag name(s) replace
+ * the generic title, the subtitle shows one match/exclude bullet per tag,
+ * and the expander count covers every leftover label.
+ */
+export function describeTagFilter(
+  tags: Array<{
+    id: string;
+    name: string;
+    targetLabels: string[];
+    contrastLabels: string[];
+  }>
+): TagFilterHeader {
+  const entries: TagFilterHeaderEntry[] = tags.map((t) => ({
+    tagId: t.id,
+    tagName: t.name,
+    match: t.targetLabels.length > 0 ? t.targetLabels[0] : null,
+    exclude: t.contrastLabels.length > 0 ? t.contrastLabels[0] : null,
+    targetLabels: [...t.targetLabels],
+    contrastLabels: [...t.contrastLabels],
+  }));
+  let shown = 0;
+  let total = 0;
+  for (const e of entries) {
+    if (e.match !== null) shown++;
+    if (e.exclude !== null) shown++;
+    total += e.targetLabels.length + e.contrastLabels.length;
+  }
+  return {
+    title: tags.map((t) => displayTagName(t.name)).join(" + "),
+    entries,
+    hiddenCount: Math.max(0, total - shown),
+  };
+}

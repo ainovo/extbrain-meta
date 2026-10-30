@@ -6,7 +6,11 @@ import React, {
   useSyncExternalStore,
 } from "react";
 import { Play, RotateCcw, Square } from "lucide-react";
-import { ParsedActivityItem } from "../lib/types";
+import {
+  NerBackendId,
+  NliBackendId,
+  ParsedActivityItem,
+} from "../lib/types";
 import {
   ProcessJobSnapshot,
   ProcessQueueItem,
@@ -44,6 +48,10 @@ interface Props {
   taxonomy: CategoryDef[];
   /** Human-facing minimum chats per mention (default 4). */
   minChats?: number;
+  /** NER backend for extraction (Settings; modal runs server-side). */
+  nerBackend: NerBackendId;
+  /** NLI backend for thread category scoring (Settings). */
+  nliBackend: NliBackendId;
 }
 
 function readStorageInfo(uuid: string) {
@@ -67,11 +75,21 @@ export const EntityProcessSection: React.FC<Props> = ({
   onCategoriesChange,
   taxonomy,
   minChats = 4,
+  nerBackend,
+  nliBackend,
 }) => {
   const [job, setJob] = useState<ProcessJobSnapshot>(() =>
     processRunner.getSnapshot()
   );
-  const [serverVersion, setServerVersion] = useState<number | null>(null);
+  const [health, setHealth] = useState<{
+    ner: number;
+    modal: number | null;
+    modalReady: boolean;
+  } | null>(null);
+  // NER records stamp the processor version of the backend in force, so a
+  // backend switch requeues even when the numbers would otherwise match.
+  const serverVersion =
+    health === null ? null : nerBackend === "local" ? health.ner : health.modal;
   const [hashes, setHashes] = useState<ChatEntityHashMap>(() =>
     loadChatEntityHashes(uuid)
   );
@@ -107,7 +125,14 @@ export const EntityProcessSection: React.FC<Props> = ({
         if (resp.ok) {
           const data = await resp.json();
           if (!cancelled && typeof data?.nerExtractorVersion === "number") {
-            setServerVersion(data.nerExtractorVersion);
+            setHealth({
+              ner: data.nerExtractorVersion,
+              modal:
+                typeof data?.modalNerVersion === "number"
+                  ? data.modalNerVersion
+                  : null,
+              modalReady: data?.modalReady === true,
+            });
             return;
           }
         }
@@ -122,6 +147,12 @@ export const EntityProcessSection: React.FC<Props> = ({
       if (timer) clearTimeout(timer);
     };
   }, []);
+
+  // A Modal backend with no server credentials blocks starting: every
+  // batch would fail, so hold with an explanation instead.
+  const modalSelected = nerBackend !== "local" || nliBackend !== "local";
+  const modalBlocked =
+    modalSelected && health !== null && !health.modalReady;
 
   const processedCount = Object.keys(entityMap).length;
   const categorizedCount = Object.keys(categoryMap).length;
@@ -149,14 +180,19 @@ export const EntityProcessSection: React.FC<Props> = ({
       hashes,
       serverVersion,
       categoryMap,
-      { isCancelled: () => cancelled, taxonomyIds: taxonomy.map((c) => c.id) }
+      {
+        isCancelled: () => cancelled,
+        taxonomyIds: taxonomy.map((c) => c.id),
+        nerBackend,
+        nliBackend,
+      }
     ).then((queues) => {
       if (!cancelled) setPendingQueues(queues);
     });
     return () => {
       cancelled = true;
     };
-  }, [items, entityMap, hashes, serverVersion, categoryMap, taxonomy, uuid, job.status, job.uuid]);
+  }, [items, entityMap, hashes, serverVersion, categoryMap, taxonomy, uuid, job.status, job.uuid, nerBackend, nliBackend]);
   const pendingCount =
     (pendingQueues?.ner.length ?? 0) + (pendingQueues?.cats.length ?? 0);
   // Name each phase: a combined "N left" can exceed the chat count (every
@@ -205,7 +241,7 @@ export const EntityProcessSection: React.FC<Props> = ({
   ) => {
     // NER needs the backend anyway; never start unversioned (null stamps
     // version-0 records that requeue on the next load).
-    if (serverVersion === null) return;
+    if (serverVersion === null || modalBlocked) return;
     processRunner.start({
       uuid,
       items,
@@ -214,6 +250,8 @@ export const EntityProcessSection: React.FC<Props> = ({
       baseThreadCategories,
       serverVersion,
       taxonomy,
+      nerBackend,
+      nliBackend,
       onBatch: (merged, batchHashes) => {
         onEntitiesChange(merged);
         setHashes((prev) => ({ ...prev, ...batchHashes }));
@@ -276,16 +314,29 @@ export const EntityProcessSection: React.FC<Props> = ({
         title="Process chats"
         sub={
           <>
-            Finds people, organizations, and places with RoBERTa-large NER for
-            mention search and highlights, then tags each thread with one of{" "}
-            {taxonomy.length}{" "}
-            {taxonomy.length === 1 ? "category" : "categories"} for Top Threads.
-            Newest first, keeps running when you switch pages.
+            Finds people, organizations, and places with{" "}
+            {nerBackend === "local" ? "on-device XLM-R NER" : "Modal XLM-R NER"}{" "}
+            for mention search and highlights, then tags each thread with one
+            of {taxonomy.length}{" "}
+            {taxonomy.length === 1 ? "category" : "categories"} for Top
+            Threads. Newest first, keeps running when you switch pages.
           </>
         }
       />
 
-      {serverVersion !== null && outdatedCount > 0 && !active && (
+      {modalBlocked && !active && (
+        <div className="rounded-xl border border-divider bg-tag px-4 py-3 text-[13px] text-ink">
+          A Modal backend is selected in Settings, but the server has no
+          Modal credentials configured — set MODAL_ANALYZE_URL and
+          EXTBRAIN_API_SECRET in the server .env and restart it. Processing
+          stays on hold until then.
+        </div>
+      )}
+
+      {serverVersion !== null &&
+        outdatedCount > 0 &&
+        !active &&
+        nerBackend === "local" && (
         <div className="rounded-xl border border-divider bg-tag px-4 py-3 text-[13px] text-ink">
           {outdatedCount} {outdatedCount === 1 ? "chat was" : "chats were"}{" "}
           processed with an older version — the current processor (v
@@ -320,12 +371,15 @@ export const EntityProcessSection: React.FC<Props> = ({
               disabled={
                 items.length === 0 ||
                 pendingCount === 0 ||
-                serverVersion === null
+                serverVersion === null ||
+                modalBlocked
               }
               title={
                 serverVersion === null
                   ? "Connecting to the backend…"
-                  : undefined
+                  : modalBlocked
+                    ? "Modal backend needs MODAL_ANALYZE_URL / EXTBRAIN_API_SECRET in the server .env"
+                    : undefined
               }
               className="inline-flex items-center gap-1.5 rounded-lg bg-action px-4 py-2 text-sm font-medium text-white hover:bg-action-hover disabled:opacity-40 transition"
             >

@@ -111,26 +111,37 @@ export const DEFAULT_META_MODEL = "muse-spark-1.3";
 /** Default for tag/summary generation: discounted, content may train Meta models. */
 export const DEFAULT_CONTRIBUTOR_MODEL = "muse-spark-1.3-contributor";
 
-/** NER backend: on-device XLM-R, or a Modal-hosted GLiNER (not wired yet). */
-export type NerBackendId = "local" | "modal-gliner";
+/**
+ * NER backend: on-device XLM-R, or the Modal deployment via /analyze. The
+ * Modal id is model-agnostic on purpose: labels name the current model, so
+ * a model swap never churns stored configs or records.
+ */
+export type NerBackendId = "local" | "modal";
 
 export const NER_BACKEND_OPTIONS: Array<{ id: NerBackendId; label: string }> = [
   {
     id: "local",
     label: "local - xlm-roberta-base-ner-hrl - based on FacebookAI/xlm-roberta-base",
   },
-  { id: "modal-gliner", label: "modal - gliner_medium-v2.1" },
+  {
+    id: "modal",
+    label: "modal - xlm-roberta-base-ner-hrl - based on FacebookAI/xlm-roberta-base",
+  },
 ];
 
-/** NLI backend: on-device mDeBERTa XNLI, or a Modal-hosted model (TBD). */
-export type NliBackendId = "local" | "modal-tbd";
+/** NLI backend: on-device mDeBERTa XNLI, or the Modal deployment. */
+export type NliBackendId = "local" | "modal";
 
 export const NLI_BACKEND_OPTIONS: Array<{ id: NliBackendId; label: string }> = [
   {
     id: "local",
     label: "local - mdeberta-v3-base-xnli-multilingual-nli - based on microsoft/mdeberta-v3-base",
   },
-  { id: "modal-tbd", label: "modal - TBD" },
+  {
+    id: "modal",
+    label:
+      "modal - xlm-roberta-base-snli-mnli-anli-xnli - based on FacebookAI/xlm-roberta-base",
+  },
 ];
 
 /**
@@ -164,9 +175,9 @@ export interface DualModelConfig {
   zeroShotThreshold?: number;
   /** NER mention floor: ignore extracted spans scoring below this (0 = off). */
   nerScoreFloor?: number;
-  /** NER backend selection (local default; modal options not wired yet). */
+  /** NER backend selection (local default; modal runs via /analyze). */
   nerBackend?: NerBackendId;
-  /** NLI backend selection (local default; modal options not wired yet). */
+  /** NLI backend selection (local default; modal runs via /analyze). */
   nliBackend?: NliBackendId;
   /** Mention surfacing rule: count entities mentioned in N+ chats (default 4). */
   mentionMinChats?: number;

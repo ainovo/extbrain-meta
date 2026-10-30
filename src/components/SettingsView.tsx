@@ -219,7 +219,6 @@ function BackendChoice<T extends string>({
   options: Array<{ id: T; label: string }>;
   onChange: (v: T) => void;
 }) {
-  const modal = value !== "local";
   return (
     <div className="py-1">
       <label className="block text-sm font-medium text-ink">{label}</label>
@@ -234,10 +233,10 @@ function BackendChoice<T extends string>({
           </option>
         ))}
       </select>
-      {modal && (
+      {value !== "local" && (
         <p className="text-xs text-mention mt-1">
-          The Modal endpoint isn&apos;t wired up yet — the local model still
-          does the work.
+          Runs on the Modal deployment (switching backends reprocesses chats
+          on the Load page).
         </p>
       )}
     </div>

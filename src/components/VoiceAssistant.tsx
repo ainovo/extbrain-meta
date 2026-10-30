@@ -9,6 +9,7 @@ import {
   runVoiceAgentTurn,
   startVoiceRecording,
   transcribeVoiceClip,
+  VoiceEndpointDetector,
   type VoiceMessage,
   type VoiceRecorder,
 } from "../lib/voiceAgent";
@@ -53,6 +54,7 @@ export const VoiceAssistant: React.FC<{
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const pulseRef = useRef<HTMLSpanElement | null>(null);
   const stoppingRef = useRef(false);
+  const endpointRef = useRef<VoiceEndpointDetector | null>(null);
   const itemsRef = useRef(items);
   itemsRef.current = items;
   const entityMapRef = useRef(entityMap);
@@ -72,6 +74,7 @@ export const VoiceAssistant: React.FC<{
       // ignore cleanup errors
     }
     recorderRef.current = null;
+    endpointRef.current = null;
     stopTimer();
     setRecording(false);
     setElapsed(0);
@@ -209,12 +212,21 @@ export const VoiceAssistant: React.FC<{
       const recorder = await startVoiceRecording();
       recorderRef.current = recorder;
       startedAtRef.current = Date.now();
+      endpointRef.current = new VoiceEndpointDetector(Date.now());
       setElapsed(0);
       setRecording(true);
       timerRef.current = window.setInterval(() => {
         const ms = Date.now() - startedAtRef.current;
         setElapsed(ms);
-        if (ms >= MAX_RECORD_MS && recorderRef.current === recorder) {
+        if (recorderRef.current !== recorder) return;
+        if (ms >= MAX_RECORD_MS) {
+          void stopRecording(recorder);
+          return;
+        }
+        // Auto-send when the user finishes: trailing silence after speech
+        // ends the turn, so no second tap is needed. Manual tap still works.
+        const detector = endpointRef.current;
+        if (detector?.update(recorder.level(), Date.now())) {
           void stopRecording(recorder);
         }
       }, 250);
@@ -324,7 +336,7 @@ export const VoiceAssistant: React.FC<{
                     Listening… {formatSecs(elapsed)}
                     <span className="flex-1" />
                     <span className="text-[11px] text-mention/70">
-                      Tap the mic to stop
+                      Auto-sends on pause · tap mic to end now
                     </span>
                   </>
                 ) : (
