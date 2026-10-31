@@ -23,7 +23,7 @@ Instead of relying on AI to guess what's important, ExtBrain empowers humans to 
 
 ### Core Capabilities
 
-*   **Multi-Source Import:** Load ChatGPT exports, Gemini / Google Search AI Mode Takeout, and Obsidian notes into one searchable library.
+*   **Multi-Source Import:** Load ChatGPT and Claude exports, Gemini / Google Search AI Mode Takeout, and Obsidian notes into one searchable library.
 *   **Granular Entity Search:** Look for specific threads involving certain people, products, brands, companies, topics, or places.
 *   **Smart Tags:** Tag chats with natural language like:
     *   *"Extract all our discussions, copy iterations, and performance results around user acquisition."*

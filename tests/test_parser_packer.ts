@@ -1,4 +1,4 @@
-import { estimateTokens, htmlFragmentToMarkdown, parseChatGptJson, parseTakeoutJson, refreshTokenEstimates } from "../src/lib/takeoutParser";
+import { detectJsonSource, estimateTokens, htmlFragmentToMarkdown, looksLikeClaudeManifest, parseChatGptJson, parseClaudeJson, parseTakeoutJson, refreshTokenEstimates } from "../src/lib/takeoutParser";
 import { renderRichText, stripLinkMarkup } from "../src/lib/richText";
 import {
   actionItemsDueBetween,
@@ -1458,6 +1458,178 @@ async function runTests() {
     "parseChatGptJson preserves message text verbatim (full stop after URL kept)"
   );
 
+  // === Claude export (conversations.json: chat_messages with human/assistant senders) ===
+
+  const claudeJson = JSON.stringify([
+    {
+      uuid: "conv-1",
+      name: "Growth plan",
+      created_at: "2026-09-01T10:00:00Z",
+      updated_at: "2026-09-01T10:05:00Z",
+      chat_messages: [
+        {
+          uuid: "m1",
+          text: "How should we price the new tier?",
+          sender: "human",
+          created_at: "2026-09-01T10:00:00Z",
+        },
+        {
+          uuid: "m2",
+          text: "Start with value-based pricing.",
+          sender: "assistant",
+          created_at: "2026-09-01T10:01:00Z",
+        },
+        {
+          uuid: "m3",
+          text: "What about annual discounts?",
+          sender: "human",
+          created_at: "2026-09-01T10:02:00Z",
+        },
+      ],
+    },
+  ]);
+  assert(
+    detectJsonSource(claudeJson) === "claude",
+    "detectJsonSource recognizes a Claude conversations.json export"
+  );
+  assert(
+    detectJsonSource(chatgptJson) === "chatgpt",
+    "detectJsonSource still recognizes a ChatGPT export"
+  );
+  // Newer Claude exports arrive as a manifest index of ZIP parts, not chats.
+  const manifestJson = JSON.stringify({
+    files: [
+      {
+        category: "conversations",
+        url: "https://cdn.example.com/conversations-000.zip",
+      },
+      { category: "projects", url: "https://cdn.example.com/projects-000.zip" },
+    ],
+  });
+  // === Claude structured content blocks + parent_message_uuid chains ===
+  // `text` is a lossy flattening: tool turns become "This block is not
+  // supported on your current device yet." placeholders, and messages with
+  // only structured content carry no usable text at all. The `content`
+  // blocks are authoritative; `parent_message_uuid` gives the reply order.
+  const claudeTreeJson = JSON.stringify([
+    {
+      uuid: "conv-tree",
+      name: "Agent build",
+      created_at: "2026-09-02T10:00:00Z",
+      updated_at: "2026-09-02T10:05:00Z",
+      chat_messages: [
+        {
+          // child arrives before its parent in the array; empty text, real content
+          uuid: "m-child",
+          text: "",
+          sender: "assistant",
+          created_at: "2026-09-02T10:01:00Z",
+          parent_message_uuid: "m-root",
+          content: [
+            { type: "text", text: "Done — see https://example.com/repo for the layout." },
+            { type: "thinking", thinking: "plan the steps" },
+            { type: "tool_use", name: "bash", input: {} },
+          ],
+        },
+        {
+          uuid: "m-toolonly",
+          text: "This block is not supported on your current device yet.",
+          sender: "assistant",
+          created_at: "2026-09-02T10:02:00Z",
+          parent_message_uuid: "m-child",
+          content: [{ type: "tool_use", name: "bash", input: {} }],
+        },
+        {
+          uuid: "m-root",
+          text: "Set up the repo.",
+          sender: "human",
+          created_at: "2026-09-02T10:00:00Z",
+          parent_message_uuid: "00000000-0000-4000-8000-000000000000",
+        },
+      ],
+    },
+  ]);
+  assert(
+    detectJsonSource(claudeTreeJson) === "claude",
+    "detectJsonSource still recognizes exports carrying content blocks"
+  );
+  const treeItems = parseClaudeJson(claudeTreeJson);
+  assert(
+    treeItems.length === 1 &&
+      treeItems[0].turns[0].prompt === "Set up the repo." &&
+      treeItems[0].turns[0].responseMarkdown ===
+        "Done — see https://example.com/repo for the layout." &&
+      !treeItems[0].turns[0].responseMarkdown.includes("not supported on your current device"),
+    "parseClaudeJson renders content text blocks in parent order and drops tool placeholders"
+  );
+  // Import dedupes on timestamp+title (App.handleItemsLoaded): turns of one
+  // conversation must carry their own message times, not the shared
+  // conversation time, or all but one collapse to a single chat.
+  const claudeMultiJson = JSON.stringify([
+    {
+      uuid: "conv-multi",
+      name: "Same Title",
+      created_at: "2026-09-03T10:00:00Z",
+      updated_at: "2026-09-03T10:05:00Z",
+      chat_messages: [
+        {
+          uuid: "m1",
+          text: "First question.",
+          sender: "human",
+          created_at: "2026-09-03T10:00:00Z",
+        },
+        {
+          uuid: "m2",
+          text: "First answer.",
+          sender: "assistant",
+          created_at: "2026-09-03T10:01:00Z",
+        },
+        {
+          uuid: "m3",
+          text: "Second question.",
+          sender: "human",
+          created_at: "2026-09-03T10:02:00Z",
+          parent_message_uuid: "m2",
+        },
+        {
+          uuid: "m4",
+          text: "Second answer.",
+          sender: "assistant",
+          created_at: "2026-09-03T10:03:00Z",
+          parent_message_uuid: "m3",
+        },
+      ],
+    },
+  ]);
+  const multiItems = parseClaudeJson(claudeMultiJson);
+  const importKeys = new Set(
+    multiItems.map((it) => `${it.timestamp}|${it.cleanTitle}`)
+  );
+  assert(
+    multiItems.length === 2 && importKeys.size === 2,
+    "parseClaudeJson stamps each turn with its own message time so same-title turns survive import"
+  );
+  assert(
+    detectJsonSource(manifestJson) === "unknown" &&
+      looksLikeClaudeManifest(manifestJson) &&
+      !looksLikeClaudeManifest(claudeJson) &&
+      !looksLikeClaudeManifest(chatgptJson) &&
+      !looksLikeClaudeManifest("not json"),
+    "manifest-shaped Claude indexes are recognized for targeted guidance, real exports are not"
+  );
+  const claudeItems = parseClaudeJson(claudeJson);
+  assert(
+    claudeItems.length === 2 &&
+      claudeItems[0].header === "Claude" &&
+      claudeItems[0].turns[0].prompt === "How should we price the new tier?" &&
+      claudeItems[0].turns[0].responseMarkdown === "Start with value-based pricing." &&
+      claudeItems[1].turns[0].prompt === "What about annual discounts?" &&
+      claudeItems[0].threadUrl === "https://claude.ai/chat/conv-1" &&
+      claudeItems[0].timestamp <= claudeItems[1].timestamp &&
+      sourceOfItem(claudeItems[0]) === "Claude",
+    "parseClaudeJson pairs human prompts with assistant replies and attributes Claude origin"
+  );
+
   const lumaHtml = renderRichText(lumaPrompt);
   assert(
     lumaHtml.includes('href="https://luma.com/b1ii8quj"') &&
@@ -1629,6 +1801,7 @@ async function runTests() {
       sourceOfItem(mkItem("x", isoDaysAgo(0), "t", "Gemini Apps", "p")) === "Gemini" &&
       sourceOfItem(mkItem("x", isoDaysAgo(0), "t", "AI Mode", "p")) === "AI Mode" &&
       sourceOfItem(mkItem("x", isoDaysAgo(0), "t", "Obsidian Note", "p")) === "Obsidian" &&
+      sourceOfItem(mkItem("x", isoDaysAgo(0), "t", "Claude", "p")) === "Claude" &&
       sourceOfItem(mkItem("x", isoDaysAgo(0), "t", "Something Else", "p")) === "Other",
     "sourceOfItem normalizes import sources"
   );

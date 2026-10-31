@@ -583,7 +583,7 @@ export function parseObsidianMarkdownFile(
   };
 }
 
-export type TakeoutJsonSource = "chatgpt" | "gemini" | "aimode" | "unknown";
+export type TakeoutJsonSource = "chatgpt" | "gemini" | "aimode" | "claude" | "unknown";
 
 /**
  * True when an entry looks like a ChatGPT conversation: it has a `title`
@@ -600,12 +600,31 @@ function isChatGptConversationEntry(entry: unknown): boolean {
 }
 
 /**
- * Detects which product a Takeout/ChatGPT JSON blob belongs to.
+ * True when an entry looks like a Claude conversation: it carries a
+ * `chat_messages` array of `{ text, sender }` objects (Claude data export —
+ * `conversations.json` is a bare array of these).
+ */
+function isClaudeConversationEntry(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const e = entry as Record<string, unknown>;
+  const msgs = e.chat_messages;
+  if (!Array.isArray(msgs)) return false;
+  return msgs.some((m) => {
+    if (!m || typeof m !== "object") return false;
+    const r = m as Record<string, unknown>;
+    if (typeof r.sender !== "string") return false;
+    return typeof r.text === "string" || Array.isArray(r.content);
+  });
+}
+
+/**
+ * Detects which product a Takeout/ChatGPT/Claude JSON blob belongs to.
  * - chatgpt: object with a `conversations` array, or a top-level array of
  *   conversation objects (ChatGPT data export — `conversations.json` is a
  *   bare array, but some exports wrap it in an object)
  * - gemini: Takeout array containing Gemini entries
  * - aimode: Takeout array containing Google Search AI Mode entries
+ * - claude: top-level array of conversations with `chat_messages`
  */
 export function detectJsonSource(jsonContent: string): TakeoutJsonSource {
   let parsed: unknown;
@@ -623,6 +642,9 @@ export function detectJsonSource(jsonContent: string): TakeoutJsonSource {
   const entries = parsed as RawTakeoutEntry[];
   if (entries.length > 0 && entries.some(isChatGptConversationEntry)) {
     return "chatgpt";
+  }
+  if (entries.length > 0 && entries.some(isClaudeConversationEntry)) {
+    return "claude";
   }
   const hasGemini = entries.some((e) => {
     if (!e || typeof e !== "object") return false;
@@ -814,6 +836,328 @@ export function parseChatGptJson(
         dateStr: turnDateStr,
         products: ["ChatGPT"],
         turns: turnArr,
+        allPromptsText,
+        condensedResponseText,
+        fullMarkdown,
+        extractedEntities,
+        estimatedFullTokens: estimateTokens(fullMarkdown),
+        estimatedPackedTokens: estimateTokens(
+          allPromptsText + (condensedResponseText ? "\n" + condensedResponseText : "")
+        ),
+      });
+    });
+  });
+
+  if (items.length === 0) {
+    throw new Error("No conversations with messages found in this file.");
+  }
+  items.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return items;
+}
+
+/**
+ * True when the blob looks like a Claude export manifest index: a JSON
+ * object (never the conversations array) that points at per-category ZIP
+ * parts via download URLs. Newer Claude exports arrive as a
+ * `manifest-*.json` listing parts like `conversations-000.zip` instead of a
+ * single `conversations.json`, so the manifest itself holds no chats.
+ * A `conversations` array value is never descended into, so a wrapped
+ * ChatGPT export (message text may contain URLs) cannot match.
+ */
+/**
+ * Anthropic's own stand-in for tool/artifact blocks in the flattened `text`
+ * rendering. The structured `content` blocks carry the real data, so the
+ * placeholder is dropped wherever `text` is used as a fallback.
+ */
+const CLAUDE_BLOCK_PLACEHOLDER =
+  "This block is not supported on your current device yet.";
+
+function scrubClaudePlaceholders(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => line.trim() !== CLAUDE_BLOCK_PLACEHOLDER)
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Authoritative message text for a Claude export message. The structured
+ * `content` blocks win (prose lives in `type: "text"` blocks; `thinking`,
+ * `tool_use`, `tool_result` and friends are execution detail, not chat
+ * content). Older exports without `content` fall back to the flattened
+ * `text` field with tool placeholders scrubbed.
+ */
+function claudeMessageText(msg: ClaudeMessage): string {
+  const content = msg.content;
+  if (Array.isArray(content) && content.length > 0) {
+    const parts: string[] = [];
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as Record<string, unknown>;
+      if (b.type === "text" && typeof b.text === "string") {
+        const t = b.text.trim();
+        if (t) parts.push(t);
+      }
+    }
+    return parts.join("\n\n").trim();
+  }
+  if (typeof content === "string" && content.trim()) return content.trim();
+  return typeof msg.text === "string" ? scrubClaudePlaceholders(msg.text) : "";
+}
+
+interface OrderedClaudeMessage {
+  msg: ClaudeMessage;
+  index: number;
+}
+
+/**
+ * Order a conversation's messages parent-before-child via
+ * `parent_message_uuid` (stable by `created_at`, then export order), so
+ * children render under the message they reply to even when the export
+ * array is not chronological. Roots are messages whose parent is absent
+ * from the conversation. Cycle-safe: leftovers append at the end.
+ */
+function orderClaudeMessages(rawMessages: unknown[]): OrderedClaudeMessage[] {
+  const entries: Array<{
+    msg: ClaudeMessage;
+    index: number;
+    uuid: string;
+    parent: string;
+    time: string;
+  }> = rawMessages.map((raw, index) => {
+    const msg = (raw || {}) as ClaudeMessage;
+    return {
+      msg,
+      index,
+      uuid: typeof msg.uuid === "string" ? msg.uuid : "",
+      parent: typeof msg.parent_message_uuid === "string" ? msg.parent_message_uuid : "",
+      time: typeof msg.created_at === "string" ? msg.created_at : "",
+    };
+  });
+  const byUuid = new Map<string, number>();
+  entries.forEach((e, i) => {
+    if (e.uuid && !byUuid.has(e.uuid)) byUuid.set(e.uuid, i);
+  });
+  const children = new Map<number, number[]>();
+  const roots: number[] = [];
+  entries.forEach((e, i) => {
+    const parentIdx = e.parent ? byUuid.get(e.parent) : undefined;
+    if (parentIdx === undefined || parentIdx === i) {
+      roots.push(i);
+    } else {
+      const arr = children.get(parentIdx) ?? [];
+      arr.push(i);
+      children.set(parentIdx, arr);
+    }
+  });
+  const byTimeThenIndex = (a: number, b: number): number => {
+    const ta = entries[a].time;
+    const tb = entries[b].time;
+    if (ta && tb && ta !== tb) return ta < tb ? -1 : 1;
+    return entries[a].index - entries[b].index;
+  };
+  roots.sort(byTimeThenIndex);
+  for (const arr of children.values()) arr.sort(byTimeThenIndex);
+  const visited = new Set<number>();
+  const ordered: OrderedClaudeMessage[] = [];
+  const visit = (i: number): void => {
+    if (visited.has(i)) return;
+    visited.add(i);
+    ordered.push({ msg: entries[i].msg, index: entries[i].index });
+    for (const child of children.get(i) ?? []) visit(child);
+  };
+  for (const r of roots) visit(r);
+  // Orphans from cycles or anything missed: keep them, don't drop them.
+  const leftover = entries.map((_, i) => i).filter((i) => !visited.has(i)).sort(byTimeThenIndex);
+  for (const i of leftover) visit(i);
+  return ordered;
+}
+
+export function looksLikeClaudeManifest(jsonContent: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonContent);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const strings: string[] = [];
+  const collect = (v: unknown, depth: number): void => {
+    if (depth > 3 || strings.length > 200) return;
+    if (typeof v === "string") {
+      strings.push(v);
+      return;
+    }
+    if (Array.isArray(v)) {
+      for (const item of v) collect(item, depth + 1);
+      return;
+    }
+    if (v && typeof v === "object") {
+      for (const k of Object.keys(v)) {
+        strings.push(k);
+        // Never descend into a `conversations` array: that is the ChatGPT
+        // wrapped-export shape (message text may contain URLs), not a
+        // manifest part list.
+        if (k === "conversations" && Array.isArray((v as Record<string, unknown>)[k])) {
+          continue;
+        }
+        collect((v as Record<string, unknown>)[k], depth + 1);
+      }
+    }
+  };
+  collect(parsed, 0);
+  const lower = strings.map((s) => s.toLowerCase());
+  return (
+    lower.some((s) => s.includes("conversations")) &&
+    lower.some((s) => s.startsWith("http") || s.endsWith(".zip"))
+  );
+}
+
+interface ClaudeMessage {
+  uuid?: unknown;
+  text?: unknown;
+  content?: unknown;
+  sender?: unknown;
+  created_at?: unknown;
+  parent_message_uuid?: unknown;
+}
+
+interface ClaudeConversation {
+  uuid?: unknown;
+  name?: unknown;
+  created_at?: unknown;
+  updated_at?: unknown;
+  chat_messages?: unknown;
+}
+
+/**
+ * Parses a Claude data export (`conversations.json`) into
+ * ParsedActivityItems. The export is a top-level array of conversation
+ * objects, each with a `name` and a `chat_messages` array whose entries
+ * carry `text`, `sender` ("human" | "assistant") and `created_at`.
+ * Like the ChatGPT parser, this emits one item per human turn paired with
+ * the assistant reply that follows it.
+ * Throws on invalid format.
+ */
+export function parseClaudeJson(
+  jsonContent: string,
+  sourceFileName = "conversations.json"
+): ParsedActivityItem[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonContent);
+  } catch {
+    throw new Error("Not valid JSON.");
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(
+      `Expected a top-level array of conversations in ${sourceFileName}`
+    );
+  }
+
+  const toIso = (v: unknown): string => {
+    if (typeof v !== "string" || !v) return "";
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? "" : d.toISOString();
+  };
+  const formatDateStr = (iso: string): string => {
+    if (!iso) return "";
+    try {
+      const d = new Date(iso);
+      if (!isNaN(d.getTime())) {
+        return d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+      }
+    } catch {
+      // ignore
+    }
+    return iso;
+  };
+
+  const items: ParsedActivityItem[] = [];
+
+  parsed.forEach((conv: unknown, convIdx: number) => {
+    const c = (conv || {}) as ClaudeConversation;
+    const title =
+      typeof c.name === "string" && c.name.trim()
+        ? c.name.trim()
+        : "Untitled chat";
+    const conversationId = typeof c.uuid === "string" && c.uuid.trim() ? c.uuid.trim() : "";
+    const threadUrl = conversationId
+      ? `https://claude.ai/chat/${encodeURIComponent(conversationId)}`
+      : undefined;
+    const titleUrl = threadUrl;
+    const rawMessages = Array.isArray(c.chat_messages) ? c.chat_messages : [];
+    const conversationIsoTime = toIso(c.created_at) || toIso(c.updated_at);
+
+    // Per-message times: every turn keeps its own prompt time so turns of
+    // one conversation stay distinct under import's timestamp+title dedupe.
+    const turns: Array<ConversationTurn & { time: string }> = [];
+    for (const { msg: m } of orderClaudeMessages(rawMessages)) {
+      const role = typeof m.sender === "string" ? m.sender.toLowerCase() : "";
+      if (role !== "human" && role !== "assistant") continue;
+      const text = claudeMessageText(m);
+      if (!text) continue;
+      if (role === "human") {
+        turns.push({
+          prompt: text,
+          responseMarkdown: "",
+          responseSummary: "",
+          extractedEntities: extractEntitiesFromText(text),
+          time: toIso(m.created_at),
+        });
+      } else {
+        const last = turns[turns.length - 1];
+        // A turn without its own prompt time (unpaired assistant reply)
+        // still borrows the reply time rather than the conversation time.
+        if (last && !last.time) last.time = toIso(m.created_at);
+        if (last && !last.responseMarkdown) {
+          last.responseMarkdown = text;
+          last.responseSummary = summarizeAiResponse(text);
+          last.extractedEntities = extractEntitiesFromText(
+            last.prompt + "\n" + text
+          );
+        } else if (last) {
+          last.responseMarkdown = (last.responseMarkdown + "\n\n" + text).trim();
+          last.responseSummary = summarizeAiResponse(last.responseMarkdown);
+          last.extractedEntities = extractEntitiesFromText(
+            last.prompt + "\n" + last.responseMarkdown
+          );
+        }
+      }
+    }
+    // Drop leading assistant-only turns with no prompt
+    const usable = turns.filter((t) => t.prompt || t.responseMarkdown);
+    if (usable.length === 0) return;
+
+    usable.forEach((turn, turnIdx) => {
+      const turnIsoTime = turn.time || conversationIsoTime;
+      const turnDateStr = formatDateStr(turnIsoTime);
+      const allPromptsText = turn.prompt;
+      const condensedResponseText = turn.responseSummary || "";
+      const fullMarkdown = `### Prompt\n${turn.prompt}\n\n### Response\n${turn.responseMarkdown}`;
+      const extractedEntities = turn.extractedEntities || [];
+
+      items.push({
+        id: `claude_${turnIsoTime.slice(0, 19).replace(/[^0-9]/g, "") || convIdx}_${convIdx}_${turnIdx}`,
+        sourceFile: sourceFileName,
+        header: "Claude",
+        title,
+        cleanTitle: title,
+        titleUrl,
+        threadUrl,
+        timestamp: turnIsoTime,
+        dateStr: turnDateStr,
+        products: ["Claude"],
+        turns: [
+          {
+            prompt: turn.prompt,
+            responseMarkdown: turn.responseMarkdown,
+            responseSummary: turn.responseSummary,
+            extractedEntities: turn.extractedEntities,
+          },
+        ],
         allPromptsText,
         condensedResponseText,
         fullMarkdown,

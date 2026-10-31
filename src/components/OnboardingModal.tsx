@@ -20,8 +20,18 @@ const ONBOARDING_SOURCES: OnboardingSource[] = [
     instructions:
       "In ChatGPT go to Settings → Data controls → Export data, then unzip the export and keep conversations.json.",
     downloadUrl:
-      "https://help.openai.com/en/articles/7268372-how-do-i-export-my-chatgpt-history-and-data",
+      "https://help.openai.com/en/articles/7260999-exporting-your-chatgpt-history-and-data",
     downloadLabel: "How to export ChatGPT history",
+  },
+  {
+    id: "claude",
+    name: "Claude",
+    fileHint: "conversations.json",
+    instructions:
+      "In Claude go to Settings → Privacy → Export data. Newer exports arrive as a manifest.json listing ZIP parts — download the conversations-*.zip parts, unzip, and import each conversations.json.",
+    downloadUrl:
+      "https://support.claude.com/en/articles/9450526-export-your-claude-data",
+    downloadLabel: "How to export Claude data",
   },
   {
     id: "gemini",

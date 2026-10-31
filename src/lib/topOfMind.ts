@@ -74,10 +74,11 @@ export function buildCategoryBreakdown(
   };
 }
 
-export type ImportSource = "ChatGPT" | "Gemini" | "AI Mode" | "Obsidian" | "Other";
+export type ImportSource = "ChatGPT" | "Claude" | "Gemini" | "AI Mode" | "Obsidian" | "Other";
 
 export const IMPORT_SOURCES: ImportSource[] = [
   "ChatGPT",
+  "Claude",
   "Gemini",
   "AI Mode",
   "Obsidian",
@@ -88,6 +89,7 @@ export const IMPORT_SOURCES: ImportSource[] = [
 export function sourceOfItem(it: ParsedActivityItem): ImportSource {
   const hay = `${it.header || ""} ${(it.products || []).join(" ")}`.toLowerCase();
   if (hay.includes("chatgpt")) return "ChatGPT";
+  if (hay.includes("claude")) return "Claude";
   if (hay.includes("gemini")) return "Gemini";
   if (hay.includes("ai mode")) return "AI Mode";
   if (hay.includes("obsidian")) return "Obsidian";
@@ -496,6 +498,7 @@ export function buildRangeStats(
 
 const zeroSources = (): Record<ImportSource, number> => ({
   ChatGPT: 0,
+  Claude: 0,
   Gemini: 0,
   "AI Mode": 0,
   Obsidian: 0,
