@@ -72,7 +72,9 @@ import { Block, BlockHeader, BlockPad, EmptyState, GhostButton } from "./ui";
 
 const SOURCE_BAR: Record<ImportSource, string> = {
   ChatGPT: "bg-ink",
-  Claude: "bg-action",
+  // Template grey distinct from every other source; bg-action is reserved
+  // for the selected bar below, so Claude must not use it.
+  Claude: "bg-ink/60",
   Gemini: "bg-mention",
   "AI Mode": "bg-divider",
   Obsidian: "bg-tag ring-1 ring-inset ring-divider",
