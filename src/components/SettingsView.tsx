@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { ChevronDown, Download } from "lucide-react";
 import {
   DEFAULT_CONTRIBUTOR_MODEL,
@@ -23,6 +23,14 @@ import {
   entityTypeRank,
 } from "../lib/entities";
 import { TemplateSettings } from "./TemplateSettings";
+import { MODELS_LOCKED } from "../lib/edition";
+import {
+  apiDelete,
+  apiGet,
+  apiPost,
+  isMeteringEnabled,
+  setMeteringEnabled,
+} from "../lib/api";
 
 function EndpointEditor({
   title,
@@ -45,7 +53,6 @@ function EndpointEditor({
       </div>
 
       <div>
-        <label className="block text-xs text-mention mb-1">Meta model</label>
         <select
           value={
             isMetaModelId(endpoint.model) ? endpoint.model : defaultModel
@@ -53,7 +60,8 @@ function EndpointEditor({
           onChange={(e) =>
             onUpdate({ provider: "meta", model: e.target.value })
           }
-          className="w-full rounded-lg bg-white border border-divider px-3 py-1.5 text-xs text-ink focus:outline-none focus:border-action"
+          disabled={MODELS_LOCKED}
+          className="w-full rounded-lg bg-white border border-divider px-3 py-1.5 text-xs text-ink focus:outline-none focus:border-action disabled:opacity-60"
         >
           {META_MODEL_OPTIONS.map((m) => (
             <option key={m.id} value={m.id}>
@@ -61,12 +69,13 @@ function EndpointEditor({
             </option>
           ))}
         </select>
+        {MODELS_LOCKED && (
+          <p className="text-xs text-mention mt-1">
+            Fixed for this deployment — contact your administrator to change it.
+          </p>
+        )}
       </div>
 
-      <p className="text-xs text-mention">
-        Runs on Meta Model API (api.meta.ai). The API key lives in the server
-        .env as MODEL_API_KEY — it is never stored in the browser.
-      </p>
     </div>
   );
 }
@@ -225,7 +234,8 @@ function BackendChoice<T extends string>({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value as T)}
-        className="mt-1 w-full rounded-lg bg-white border border-divider px-3 py-1.5 text-xs text-ink focus:outline-none focus:border-action"
+        disabled={MODELS_LOCKED}
+        className="mt-1 w-full rounded-lg bg-white border border-divider px-3 py-1.5 text-xs text-ink focus:outline-none focus:border-action disabled:opacity-60"
       >
         {options.map((o) => (
           <option key={o.id} value={o.id}>
@@ -233,11 +243,275 @@ function BackendChoice<T extends string>({
           </option>
         ))}
       </select>
+      {MODELS_LOCKED && (
+        <p className="text-xs text-mention mt-1">
+          Fixed for this deployment — contact your administrator to change it.
+        </p>
+      )}
       {value !== "local" && (
         <p className="text-xs text-mention mt-1">
           Runs on the Modal deployment (switching backends reprocesses chats
           on the Load page).
         </p>
+      )}
+    </div>
+  );
+}
+
+interface CostDraftRow {
+  input: string;
+  cached: string;
+  output: string;
+}
+
+interface CostsPayload {
+  dbAvailable: boolean;
+  rates: Record<string, { inputPer1M: number; cachedInputPer1M: number; outputPer1M: number }>;
+  modalPerSec: number;
+  custom: boolean;
+}
+
+/** Logging & metering controls: kill-switch plus the editable cost table. */
+function LoggingMeteringSettings() {
+  const [meterOn, setMeterOn] = useState(() => isMeteringEnabled());
+  const [costs, setCosts] = useState<CostsPayload | null>(null);
+  const [draft, setDraft] = useState<Record<string, CostDraftRow>>({});
+  const [modalDraft, setModalDraft] = useState("");
+  const [costError, setCostError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await apiGet("/api/costs");
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = (await resp.json()) as CostsPayload;
+        if (cancelled) return;
+        setCosts(data);
+        const d: Record<string, CostDraftRow> = {};
+        for (const [id, r] of Object.entries(data.rates || {})) {
+          d[id] = {
+            input: String(r.inputPer1M ?? ""),
+            cached: String(r.cachedInputPer1M ?? ""),
+            output: String(r.outputPer1M ?? ""),
+          };
+        }
+        setDraft(d);
+        setModalDraft(String(data.modalPerSec ?? ""));
+        setCostError(null);
+      } catch (e) {
+        if (!cancelled) {
+          setCostError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadTick]);
+
+  const toggleMetering = (on: boolean) => {
+    if (MODELS_LOCKED) return;
+    setMeteringEnabled(on);
+    setMeterOn(on);
+  };
+
+  const setCell = (id: string, field: keyof CostDraftRow, value: string) =>
+    setDraft((prev) => ({ ...prev, [id]: { ...prev[id], [field]: value } }));
+
+  const handleSave = async () => {
+    setSaving(true);
+    setCostError(null);
+    try {
+      const rates: Record<string, { inputPer1M: number; cachedInputPer1M: number; outputPer1M: number }> = {};
+      for (const [id, row] of Object.entries(draft)) {
+        const input = Number(row.input);
+        const cached = Number(row.cached);
+        const output = Number(row.output);
+        if (
+          ![input, cached, output].every((v) => Number.isFinite(v) && v >= 0)
+        ) {
+          throw new Error(`Invalid rates for ${id}: enter numbers >= 0.`);
+        }
+        rates[id] = { inputPer1M: input, cachedInputPer1M: cached, outputPer1M: output };
+      }
+      const modalPerSec = Number(modalDraft);
+      if (!Number.isFinite(modalPerSec) || modalPerSec < 0) {
+        throw new Error("Invalid Modal rate: enter a number >= 0.");
+      }
+      const resp = await apiPost("/api/costs", { rates, modalPerSec });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(
+          (errData as { error?: string }).error || `HTTP ${resp.status}`
+        );
+      }
+      setReloadTick((t) => t + 1);
+    } catch (e) {
+      setCostError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleReset = async () => {
+    setSaving(true);
+    setCostError(null);
+    try {
+      const resp = await apiDelete("/api/costs");
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(
+          (errData as { error?: string }).error || `HTTP ${resp.status}`
+        );
+      }
+      setReloadTick((t) => t + 1);
+    } catch (e) {
+      setCostError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const orderedIds = useMemo(() => {
+    const ids = META_MODEL_OPTIONS.map((m) => m.id).filter((id) => draft[id]);
+    for (const id of Object.keys(draft)) {
+      if (!ids.includes(id)) ids.push(id);
+    }
+    return ids;
+  }, [draft]);
+
+  const labelFor = (id: string) =>
+    META_MODEL_OPTIONS.find((m) => m.id === id)?.label ?? id;
+
+  return (
+    <div className="space-y-4 py-1">
+      <label
+        className={`flex items-start gap-2.5 text-sm text-ink ${MODELS_LOCKED ? "" : "cursor-pointer"}`}
+      >
+        <input
+          type="checkbox"
+          checked={MODELS_LOCKED || meterOn}
+          disabled={MODELS_LOCKED}
+          onChange={(e) => toggleMetering(e.target.checked)}
+          className="mt-0.5 h-4 w-4 shrink-0 accent-action disabled:opacity-60"
+        />
+        <span>
+          <span className="block font-medium">Enable logging &amp; metering</span>
+          <span className="block text-xs text-mention mt-0.5">
+            {MODELS_LOCKED
+              ? "Required on this deployment — usage is always logged and cannot be turned off."
+              : "When off, this browser sends no consent, visit, or usage rows to MongoDB — model calls keep working, they just aren't logged."}
+          </span>
+        </span>
+      </label>
+
+      {!MODELS_LOCKED && (
+      <div>
+        <div className="text-sm font-medium text-ink">Cost table (USD)</div>
+        <div className="text-xs text-mention mt-0.5">
+          Per 1M tokens for Meta models, per second for Modal. Applies to
+          future logs only — past rows keep their recorded cost.
+          {costs?.custom ? " Custom rates are active." : ""}
+        </div>
+        {!costs && !costError && (
+          <div className="text-xs text-mention mt-2">Loading cost table…</div>
+        )}
+        {costError && (
+          <div className="text-xs text-ink mt-2">
+            Couldn&apos;t load the cost table: {costError}
+          </div>
+        )}
+        {costs && (
+          <div className="mt-2 space-y-2">
+            {!costs.dbAvailable && (
+              <div className="text-xs text-mention">
+                MongoDB is not configured (MONGODB_URI), so rates are read-only
+                built-ins. Connect a database to edit them.
+              </div>
+            )}
+            {orderedIds.map((id) => (
+              <div
+                key={id}
+                className="rounded-xl border border-divider px-3 py-2"
+              >
+                <div className="text-xs font-semibold text-ink">
+                  {labelFor(id)}{" "}
+                  <span className="font-mono font-normal text-mention/70">
+                    {id}
+                  </span>
+                </div>
+                <div className="mt-1.5 grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { field: "input", label: "Input /1M" },
+                      { field: "cached", label: "Cached /1M" },
+                      { field: "output", label: "Output /1M" },
+                    ] as const
+                  ).map(({ field, label }) => (
+                    <label key={field} className="block">
+                      <span className="block text-[11px] text-mention mb-0.5">
+                        {label}
+                      </span>
+                      <input
+                        type="number"
+                        min={0}
+                        step="any"
+                        value={draft[id]?.[field] ?? ""}
+                        disabled={!costs.dbAvailable || saving}
+                        onChange={(e) => setCell(id, field, e.target.value)}
+                        className="w-full rounded-lg bg-white border border-divider px-2 py-1 text-xs text-ink font-mono focus:outline-none focus:border-action disabled:opacity-60"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div className="rounded-xl border border-divider px-3 py-2">
+              <div className="text-xs font-semibold text-ink">
+                Modal{" "}
+                <span className="font-mono font-normal text-mention/70">
+                  modal
+                </span>
+              </div>
+              <label className="block mt-1.5">
+                <span className="block text-[11px] text-mention mb-0.5">
+                  USD per second
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  step="any"
+                  value={modalDraft}
+                  disabled={!costs.dbAvailable || saving}
+                  onChange={(e) => setModalDraft(e.target.value)}
+                  className="w-full rounded-lg bg-white border border-divider px-2 py-1 text-xs text-ink font-mono focus:outline-none focus:border-action disabled:opacity-60"
+                />
+              </label>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={!costs.dbAvailable || saving}
+                onClick={() => void handleSave()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-action px-3 py-1.5 text-xs font-medium text-white hover:bg-action-hover disabled:opacity-40 transition"
+              >
+                {saving ? "Saving…" : "Save rates"}
+              </button>
+              <button
+                type="button"
+                disabled={!costs.dbAvailable || saving || !costs.custom}
+                onClick={() => void handleReset()}
+                className="px-3 py-1.5 text-xs text-mention hover:text-ink underline disabled:opacity-40 transition"
+              >
+                Reset to defaults
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
       )}
     </div>
   );
@@ -500,6 +774,15 @@ export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMa
               onChange({ ...config, voice: updated })
             }
           />
+        </SettingsSection>
+
+        <SettingsSection
+          id="metering"
+          title="Logging & metering"
+          collapsed={collapsed.has("metering")}
+          onToggle={toggle}
+        >
+          <LoggingMeteringSettings />
         </SettingsSection>
 
         <SettingsSection

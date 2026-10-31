@@ -1,0 +1,15 @@
+# Source-upload denylist for `gcloud run deploy --source` / `gcloud builds submit`.
+# Keeps the upload small: dependencies reinstall inside the Docker builder.
+# NOTE: .env.cloudrun is intentionally included (the cloudrun build needs it).
+node_modules/
+dist/
+.git/
+.gitignore
+.env
+.env.local
+models/
+.venv/
+modal/__pycache__/
+tsconfig.tsbuildinfo
+*.log
+*.md

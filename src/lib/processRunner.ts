@@ -21,6 +21,7 @@ import {
   threadNeedsCategoryScoring,
 } from "./categoryTags";
 import { summarizeThreads, ThreadSummary } from "./threads";
+import { apiPost } from "./api";
 
 export interface ProcessQueueItem {
   id: string;
@@ -220,6 +221,30 @@ export interface ProcessQueues {
 }
 
 /**
+ * Pure gate for auto-starting processing after a fresh import. True only
+ * when a new dataset arrived (hasChats), the runner is idle, the user did
+ * not stop it, the backend version and pending queues resolved, work
+ * remains, and this dataset was not already auto-started.
+ */
+export function shouldAutoStartProcessing(opts: {
+  hasChats: boolean;
+  active: boolean;
+  userStopped: boolean;
+  serverReady: boolean;
+  blocked: boolean;
+  queuesReady: boolean;
+  pendingCount: number;
+  alreadyStarted: boolean;
+}): boolean {
+  if (!opts.hasChats) return false;
+  if (opts.active || opts.userStopped) return false;
+  if (!opts.serverReady || opts.blocked) return false;
+  if (!opts.queuesReady || opts.pendingCount === 0) return false;
+  if (opts.alreadyStarted) return false;
+  return true;
+}
+
+/**
  * Same pending-work result as buildProcessQueue + buildThreadCategoryQueue,
  * computed in chunks with yields to the event loop so mounting the Load
  * page never blocks navigation and paint on large histories. Returns empty
@@ -312,6 +337,8 @@ class EntityProcessRunner {
   private uuid: string | null = null;
   private abort: AbortController | null = null;
   private runId = 0;
+  /** Metering job id shared by every chunk of one run (single log row). */
+  private meterJobId = "";
   private listeners = new Set<Listener>();
 
   getSnapshot(): ProcessJobSnapshot {
@@ -368,6 +395,11 @@ class EntityProcessRunner {
       return true;
     }
     const id = ++this.runId;
+    try {
+      this.meterJobId = crypto.randomUUID();
+    } catch {
+      this.meterJobId = `job-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+    }
     const controller = new AbortController();
     this.abort = controller;
     this.status = "running";
@@ -406,15 +438,16 @@ class EntityProcessRunner {
       for (let i = 0; i < queue.length; i += batchSize) {
         if (!alive() || controller.signal.aborted) return;
         const slice = queue.slice(i, i + batchSize);
-        const resp = await fetch("/api/extract-entities-batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+        const resp = await apiPost(
+          "/api/extract-entities-batch",
+          {
             items: slice,
             backend: args.nerBackend ?? "local",
-          }),
-          signal: controller.signal,
-        });
+            jobId: this.meterJobId,
+            isLast: i + batchSize >= queue.length && catQueue.length === 0,
+          },
+          { signal: controller.signal }
+        );
         if (!alive()) return;
         if (!resp.ok) {
           const errData = await resp.json().catch(() => ({}));
@@ -460,19 +493,20 @@ class EntityProcessRunner {
         if (!alive() || controller.signal.aborted) return;
         const slice = catQueue.slice(i, i + catBatchSize);
         const hashById = new Map(slice.map((s) => [s.id, s.hash]));
-        const resp = await fetch("/api/classify-batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+        const resp = await apiPost(
+          "/api/classify-batch",
+          {
             items: slice.map((s) => ({ id: s.id, text: s.text })),
             labels: taxonomy.map((c) => c.id),
             // One category per thread: softmax the labels, don't score
             // each independently.
             multiLabel: false,
             backend: args.nliBackend ?? "local",
-          }),
-          signal: controller.signal,
-        });
+            jobId: this.meterJobId,
+            isLast: i + catBatchSize >= catQueue.length,
+          },
+          { signal: controller.signal }
+        );
         if (!alive()) return;
         if (!resp.ok) {
           const errData = await resp.json().catch(() => ({}));

@@ -16,7 +16,7 @@ import {
   restoreBackup,
 } from "../lib/exportData";
 
-type SourceId = "chatgpt" | "gemini" | "aimode" | "obsidian";
+export type SourceId = "chatgpt" | "gemini" | "aimode" | "obsidian";
 
 interface SourceDef {
   id: SourceId;
@@ -32,7 +32,7 @@ const SOURCES: SourceDef[] = [
   { id: "obsidian", name: "Obsidian", fileHint: ".md notes", accept: ".md" },
 ];
 
-function SourceLogo({ id }: { id: SourceId }) {
+export function SourceLogo({ id }: { id: SourceId }) {
   if (id === "chatgpt") {
     return (
       <svg viewBox="0 0 24 24" className="w-6 h-6 text-ink" fill="currentColor" aria-label="ChatGPT">

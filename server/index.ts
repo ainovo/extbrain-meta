@@ -39,6 +39,39 @@ import {
   mapWithConcurrency,
   retryDelayMs,
 } from "../src/lib/synthesize";
+import {
+  createRateLimiter,
+  isAdminAuthorized,
+  isMeteringEnforced,
+  isModelAllowed,
+  parseAllowedModels,
+  parseAllowedOrigins,
+} from "./security";
+import {
+  FREE_BUDGET_USD,
+  META_MODEL_COSTS,
+  getEffectiveMetaCosts,
+  getEffectiveModalPerSec,
+  metaCostUsd,
+  modalCostUsd,
+  parseMetaUsage,
+  remainingFreePct,
+  resetEffectiveCosts,
+  sanitizeCustomCosts,
+  setEffectiveCosts,
+} from "./costs";
+import { ModalJobAggregator } from "./modalJobs";
+import {
+  clearCustomCosts,
+  getTotalMeteredCost,
+  isMongoConfigured,
+  loadCustomCosts,
+  logConsent,
+  logMetering,
+  logVisit,
+  sanitizeUserId,
+  saveCustomCosts,
+} from "./db";
 
 // Absolute path: .env must load even when the server starts outside the
 // repo root (e.g. from modal/); a missing file is silently ignored.
@@ -53,8 +86,337 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(cors());
+// Behind Cloud Run (or any reverse proxy) the client IP arrives in
+// X-Forwarded-For; without this, every request shares one IP and the rate
+// limiters below would throttle all users together.
+app.set("trust proxy", 1);
+
+// CORS allowlist: set CORS_ORIGINS to a comma-separated list of origins
+// (e.g. "https://app.extbrain.ai") on any public deployment. Unset keeps
+// the historical allow-all behavior for local development.
+const allowedOrigins = parseAllowedOrigins();
+if (!allowedOrigins && process.env.NODE_ENV === "production") {
+  console.warn(
+    "[cors] CORS_ORIGINS is unset: allowing all origins. " +
+      "Set CORS_ORIGINS to your frontend domain(s) on public deployments."
+  );
+}
+app.use(cors(allowedOrigins ? { origin: allowedOrigins } : {}));
 app.use(express.json({ limit: "50mb" }));
+
+// Abuse guard for the paid Meta-backed endpoints. Limits are per instance
+// per client IP over a 15-minute window; tune with RATE_LIMIT_API_MAX and
+// RATE_LIMIT_GEN_MAX (0 disables that limiter, e.g. behind your own gateway).
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+function envPositiveInt(name: string, fallback: number): number {
+  const v = Number((process.env[name] || "").trim());
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : fallback;
+}
+const apiMax = envPositiveInt("RATE_LIMIT_API_MAX", 600);
+const genMax = envPositiveInt("RATE_LIMIT_GEN_MAX", 60);
+if (apiMax > 0) {
+  app.use("/api", createRateLimiter({ windowMs: RATE_LIMIT_WINDOW_MS, max: apiMax }));
+}
+if (genMax > 0) {
+  // Stricter cap on the endpoints that spend Meta API quota.
+  app.use(
+    [
+      "/api/discover",
+      "/api/synthesize",
+      "/api/synthesize-thread-stream",
+      "/api/voice-transcribe",
+      "/api/voice-agent",
+    ],
+    createRateLimiter({
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      max: genMax,
+      message: "Generation budget exceeded for this address.",
+    })
+  );
+}
+
+// Client identity for consent + metering. The browser sends its local uuid
+// as X-User-Id (see src/lib/api.ts); the body field is a fallback for
+// hand-rolled clients. Missing → "anonymous" so spend is still logged.
+app.use((req, _res, next) => {
+  const fromHeader = req.get("X-User-Id");
+  const fromBody =
+    req.body && typeof req.body === "object"
+      ? (req.body as Record<string, unknown>).userId
+      : undefined;
+  (req as unknown as { userId: string }).userId = sanitizeUserId(
+    typeof fromHeader === "string" && fromHeader.trim() !== ""
+      ? fromHeader
+      : fromBody
+  );
+  // Settings → Logging & metering toggle. When the user disables logging,
+  // the client sends X-Metering-Opt-Out and the server skips every write
+  // (consent, visits, metering). No rows are created for opted-out users.
+  (req as unknown as { meteringOptOut: boolean }).meteringOptOut =
+    req.get("X-Metering-Opt-Out") === "1" && !isMeteringEnforced();
+  next();
+});
+
+/**
+ * Server-side model gate. The Settings UI lock is cosmetic (anyone can
+ * POST a different model id with curl), so locked deployments enforce the
+ * allowlist here, on every Meta call. Unset ALLOWED_META_MODELS = allow
+ * everything (local development).
+ */
+function rejectDisallowedModel(
+  res: { status: (code: number) => { json: (body: unknown) => void } },
+  model: unknown
+): boolean {
+  if (isModelAllowed(model, parseAllowedModels())) return false;
+  res.status(403).json({
+    error:
+      "This deployment only allows specific models. Change the model in Settings (if available) or contact your administrator.",
+  });
+  return true;
+}
+
+/**
+ * Kill switch for the entire cost-table surface. With DISABLE_COSTS_API=1
+ * (Cloud Run), /api/costs behaves as if never deployed — every method 404s
+ * before reaching any handler, so there is nothing to authenticate against
+ * or bypass. The code still ships in the image but is unreachable.
+ */
+if (
+  ["1", "true"].includes(
+    (process.env.DISABLE_COSTS_API || "").trim().toLowerCase()
+  )
+) {
+  console.log("[costs] cost-table API disabled (DISABLE_COSTS_API=1).");
+  app.use("/api/costs", (_req, res) => {
+    res.status(404).json({ error: "Not found." });
+  });
+}
+
+/** Admin gate for cost-table writes. Open when ADMIN_API_KEY is unset. */
+function rejectUnauthorizedAdmin(req: {
+  get: (name: string) => string | undefined;
+}): { status: number; error: string } | null {
+  const configured = (process.env.ADMIN_API_KEY || "").trim();
+  if (isAdminAuthorized(req.get("X-Admin-Key"), configured)) return null;
+  return {
+    status: 403,
+    error: "Cost table changes require a valid admin key.",
+  };
+}
+
+function isOptedOut(req: express.Request): boolean {
+  return (req as unknown as { meteringOptOut?: boolean }).meteringOptOut === true;
+}
+
+function reqUid(req: express.Request): string {
+  return sanitizeUserId((req as unknown as { userId?: unknown }).userId);
+}
+
+// Onboarding consent + app-load visit. Fire-and-forget from the client;
+// failures never surface (metering must not break the app).
+app.post("/api/consent", async (req, res) => {
+  try {
+    const { consentAt } = req.body as { consentAt?: unknown };
+    const at =
+      typeof consentAt === "string" && consentAt.trim() !== ""
+        ? consentAt.trim().slice(0, 64)
+        : new Date().toISOString();
+    if (!isOptedOut(req)) await logConsent(reqUid(req), at);
+    res.json({ ok: true });
+  } catch {
+    res.json({ ok: true });
+  }
+});
+
+app.post("/api/visit", async (req, res) => {
+  try {
+    if (!isOptedOut(req)) await logVisit(reqUid(req));
+    res.json({ ok: true });
+  } catch {
+    res.json({ ok: true });
+  }
+});
+
+/**
+ * Cost table for Settings → Logging & metering. GET returns the effective
+ * rates (built-ins merged with saved customs); POST validates and saves a
+ * custom table; DELETE reverts to built-ins. Rates apply to future logs
+ * only. Writing requires MongoDB; without MONGODB_URI the table is
+ * read-only built-ins.
+ */
+app.get("/api/costs", async (_req, res) => {
+  try {
+    res.json({
+      dbAvailable: isMongoConfigured(),
+      rates: getEffectiveMetaCosts(),
+      modalPerSec: getEffectiveModalPerSec(),
+      custom: (await loadCustomCosts()) !== null,
+    });
+  } catch {
+    res.status(500).json({ error: "Failed to load cost table." });
+  }
+});
+
+app.post("/api/costs", async (req, res) => {
+  try {
+    const admin = rejectUnauthorizedAdmin(req);
+    if (admin) {
+      res.status(admin.status).json({ error: admin.error });
+      return;
+    }
+    if (!isMongoConfigured()) {
+      res.status(400).json({
+        error:
+          "MongoDB is not configured (MONGODB_URI). Custom rates need a database to persist.",
+      });
+      return;
+    }
+    const parsed = sanitizeCustomCosts(req.body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    await saveCustomCosts(parsed.costs);
+    setEffectiveCosts(
+      { ...META_MODEL_COSTS, ...parsed.costs.rates },
+      parsed.costs.modalPerSec
+    );
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: "Failed to save cost table." });
+  }
+});
+
+/**
+ * Free-usage meter for the onboarding page: percent remaining of the $200
+ * pool, i.e. 1 - sum(costUsd) / budget. Without Mongo there is no tracked
+ * spend, so the pool reads as untouched.
+ */
+app.get("/api/usage", async (_req, res) => {
+  try {
+    const totalCost = await getTotalMeteredCost();
+    res.json({
+      totalCostUsd: totalCost,
+      budgetUsd: FREE_BUDGET_USD,
+      remainingPct: remainingFreePct(totalCost),
+    });
+  } catch {
+    res.status(500).json({ error: "Failed to load usage." });
+  }
+});
+
+app.delete("/api/costs", async (req, res) => {
+  try {
+    const admin = rejectUnauthorizedAdmin(req);
+    if (admin) {
+      res.status(admin.status).json({ error: admin.error });
+      return;
+    }
+    if (!isMongoConfigured()) {
+      res.status(400).json({ error: "MongoDB is not configured (MONGODB_URI)." });
+      return;
+    }
+    await clearCustomCosts();
+    resetEffectiveCosts();
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: "Failed to reset cost table." });
+  }
+});
+
+// Apply saved custom rates on startup (validated; corrupt docs fall back
+// to built-ins rather than breaking metering).
+void loadCustomCosts().then((custom) => {
+  if (!custom) return;
+  const parsed = sanitizeCustomCosts({
+    rates: custom.rates,
+    modalPerSec: custom.modalPerSec,
+  });
+  if (parsed.ok) {
+    setEffectiveCosts(
+      { ...META_MODEL_COSTS, ...parsed.costs.rates },
+      parsed.costs.modalPerSec
+    );
+    console.log("[costs] applied saved custom rates.");
+  } else {
+    console.warn(`[costs] ignoring invalid saved rates: ${parsed.error}`);
+  }
+});
+
+// One aggregator for Modal chunk jobs: each chunk adds its measured
+// duration; the `isLast` chunk (or TTL expiry) logs exactly one row.
+const modalJobs = new ModalJobAggregator();
+
+/**
+ * Meter one Modal chunk. Chunked jobs (jobId set) accumulate durations and
+ * log exactly one row on `isLast` (or on TTL expiry for aborted runs).
+ * Single-shot calls without a jobId log immediately. Local backends are
+ * never metered (free, no usage to report).
+ */
+function recordModalChunk(opts: {
+  jobId?: unknown;
+  isLast?: unknown;
+  userId: string;
+  kind: string;
+  model: string;
+  durationMs: number;
+  allowed?: boolean;
+}): void {
+  if (opts.allowed === false) return;
+  const jobId =
+    typeof opts.jobId === "string" ? opts.jobId.trim().slice(0, 128) : "";
+  const row = {
+    userId: opts.userId,
+    kind: opts.kind,
+    model: opts.model,
+    backend: "modal" as const,
+    inputTokens: 0,
+    outputTokens: 0,
+    durationMs: Math.max(0, Math.round(opts.durationMs)),
+    costUsd: 0,
+  };
+  if (!jobId) {
+    row.costUsd = modalCostUsd(row.durationMs);
+    void logMetering(row);
+    return;
+  }
+  modalJobs.addChunk(jobId, {
+    userId: row.userId,
+    kind: row.kind,
+    model: row.model,
+    durationMs: row.durationMs,
+  });
+  if (opts.isLast === true) {
+    const total = modalJobs.completeJob(jobId);
+    if (total) {
+      void logMetering({
+        userId: total.userId,
+        kind: total.kind,
+        model: total.model,
+        backend: "modal",
+        inputTokens: 0,
+        outputTokens: 0,
+        durationMs: total.totalMs,
+        costUsd: modalCostUsd(total.totalMs),
+      });
+    }
+  }
+}
+setInterval(() => {
+  const expired = modalJobs.sweepExpired();
+  for (const job of expired) {
+    void logMetering({
+      userId: job.userId,
+      kind: job.kind,
+      model: job.model,
+      backend: "modal",
+      inputTokens: 0,
+      outputTokens: 0,
+      durationMs: job.totalMs,
+      costUsd: modalCostUsd(job.totalMs),
+    });
+  }
+}, 5 * 60 * 1000).unref?.();
 
 /** Meta Model API base URL. The key lives only in the server .env. */
 const META_API_BASE_URL = "https://api.meta.ai/v1";
@@ -72,12 +434,27 @@ function metaApiKey(): string {
   return (process.env.MODEL_API_KEY || "").trim();
 }
 
+export interface MeterContext {
+  userId: string;
+  kind: string;
+  /** False when the user disabled logging (skip all writes). */
+  allowed: boolean;
+  /**
+   * Aborted when the browser goes away (stop button, navigation, or a
+   * superseded StrictMode remount). Threaded into Meta fetches so an
+   * abandoned run stops spending quota instead of running to completion.
+   */
+  signal?: AbortSignal;
+}
+
 async function callLLM(
   config: ModelEndpointConfig,
   systemPrompt: string,
   userPrompt: string,
-  jsonSchema?: { name: string; schema: Record<string, unknown> }
+  jsonSchema?: { name: string; schema: Record<string, unknown> },
+  meter?: MeterContext
 ): Promise<string> {
+  const started = Date.now();
   const apiKey = metaApiKey();
   const model = config.model.trim();
   if (!model) {
@@ -118,12 +495,35 @@ async function callLLM(
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: meter?.signal,
     });
 
     if (resp.ok) {
       const data = (await resp.json()) as {
         choices?: Array<{ message?: { content?: string } }>;
+        usage?: Record<string, unknown>;
       };
+      if (meter && meter.allowed) {
+        // Token counts come straight from the Meta response; unknown
+        // models have no cost-table entry and log $0.
+        const usage = parseMetaUsage(data);
+        const durationMs = Date.now() - started;
+        void logMetering({
+          userId: meter.userId,
+          kind: meter.kind,
+          model,
+          backend: "meta",
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          durationMs,
+          costUsd: metaCostUsd(
+            model,
+            usage.inputTokens,
+            usage.cachedInputTokens,
+            usage.outputTokens
+          ),
+        });
+      }
       return (data.choices?.[0]?.message?.content || "").trim();
     }
 
@@ -319,9 +719,11 @@ async function callModalAnalyze(body: ModalAnalyzeBody): Promise<unknown[]> {
 
 app.post("/api/extract-entities-batch", async (req, res) => {
   try {
-    const { items, backend } = req.body as {
+    const { items, backend, jobId, isLast } = req.body as {
       items: Array<{ id: string; text: string }>;
       backend?: string;
+      jobId?: string;
+      isLast?: boolean;
     };
     if (!items || items.length === 0) {
       res.json({ results: [] });
@@ -330,6 +732,7 @@ app.post("/api/extract-entities-batch", async (req, res) => {
 
     // Legacy "modal-gliner" tolerated for in-flight clients mid-upgrade.
     if (backend === "modal" || backend === "modal-gliner") {
+      const started = Date.now();
       const normalized = normalizeModalResults(
         await callModalAnalyze(
           buildModalNerBody(items.map((e) => e.text || ""))
@@ -341,6 +744,15 @@ app.post("/api/extract-entities-batch", async (req, res) => {
           `Modal /analyze returned a misaligned batch for ${items.length} texts.`
         );
       }
+      recordModalChunk({
+        jobId,
+        isLast,
+        userId: reqUid(req),
+        allowed: !isOptedOut(req),
+        kind: "modal-ner",
+        model: "modal",
+        durationMs: Date.now() - started,
+      });
       res.json({
         results: items.map((entry, i) => ({
           id: entry.id,
@@ -440,6 +852,8 @@ app.post("/api/generate-nli-labels", async (req, res) => {
       return;
     }
 
+    if (rejectDisallowedModel(res, modelConfig?.model)) return;
+
     const today = new Date().toISOString().slice(0, 10);
 
     const systemPrompt = `You generate NLI zero-shot evaluation labels for multilingual-MiniLMv2-L6-mnli-xnli (multilingual NLI).
@@ -492,7 +906,8 @@ Output strict JSON only:
         ],
         additionalProperties: false,
       },
-    });
+    },
+      { userId: reqUid(req), kind: "tag-labels", allowed: !isOptedOut(req) });
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       throw new Error("LLM did not return valid JSON for NLI labels.");
@@ -565,11 +980,13 @@ app.post("/api/classify-entry", async (req, res) => {
 
 app.post("/api/classify-batch", async (req, res) => {
   try {
-    const { items, labels, multiLabel, backend } = req.body as {
+    const { items, labels, multiLabel, backend, jobId, isLast } = req.body as {
       items: Array<{ id: string; text: string }>;
       labels: string[];
       multiLabel?: boolean;
       backend?: string;
+      jobId?: string;
+      isLast?: boolean;
     };
     const cleanLabels = (labels || []).map((l) => l.trim()).filter(Boolean);
     if (!items || items.length === 0 || cleanLabels.length === 0) {
@@ -582,6 +999,7 @@ app.post("/api/classify-batch", async (req, res) => {
 
     // Legacy "modal-bge-m3" tolerated for in-flight clients mid-upgrade.
     if (backend === "modal" || backend === "modal-bge-m3") {
+      const started = Date.now();
       const normalized = normalizeModalResults(
         await callModalAnalyze(
           buildModalNliBody(
@@ -597,6 +1015,15 @@ app.post("/api/classify-batch", async (req, res) => {
           `Modal /analyze returned a misaligned batch for ${items.length} texts.`
         );
       }
+      recordModalChunk({
+        jobId,
+        isLast,
+        userId: reqUid(req),
+        allowed: !isOptedOut(req),
+        kind: "modal-nli",
+        model: "modal",
+        durationMs: Date.now() - started,
+      });
       res.json({
         results: items.map((entry, i) => ({
           id: entry.id,
@@ -1000,6 +1427,9 @@ app.post("/api/discover", async (req, res) => {
       return;
     }
 
+    // Only enforced when a Meta call will actually happen (see above).
+    if (rejectDisallowedModel(res, modelConfig?.model)) return;
+
     const systemPrompt = `You are an expert Project Thread Stitcher for Google Takeout AI chat histories.
 Your job is to identify ALL activity entries belonging to the user's target project across weeks or months, even when follow-up chats omit the project name.
 
@@ -1055,7 +1485,8 @@ ${JSON.stringify(compactCards, null, 2)}`;
         required: ["discoveredEntities", "matches"],
         additionalProperties: false,
       },
-    });
+    },
+      { userId: reqUid(req), kind: "discover", allowed: !isOptedOut(req) });
 
     // Extract JSON block safely
     const jsonMatch = rawResponse.match(/\{[\s\S]*\}/);
@@ -1105,6 +1536,18 @@ ${JSON.stringify(compactCards, null, 2)}`;
  * STAGE 2: Asymmetric Context Synthesis (Single-Call or Adaptive Multi-Batch Merge)
  */
 app.post("/api/synthesize", async (req, res) => {
+  // Same client-gone protection as the streaming endpoint: an abandoned
+  // (navigated-away, superseded) request stops its Meta calls instead of
+  // burning quota to completion.
+  const clientGone = new AbortController();
+  // NOTE: this must watch the *response*, not the request: req 'close'
+  // fires as soon as Express finishes reading the POST body, which would
+  // wrongly cancel every run. res 'close' before writableEnded means the
+  // browser actually went away.
+  const onClientClose = () => {
+    if (!res.writableEnded) clientGone.abort();
+  };
+  res.on("close", onClientClose);
   try {
     const {
       projectQuery,
@@ -1123,6 +1566,8 @@ app.post("/api/synthesize", async (req, res) => {
       return;
     }
 
+    if (rejectDisallowedModel(res, modelConfig?.model)) return;
+
     // Case 1: Single batch (typical for 1 - 150 chats with Asymmetric Packing) -> 1 LLM Call
     if (batches.length === 1) {
       const userPrompt = `PROJECT TOPIC: "${projectQuery}"
@@ -1135,7 +1580,14 @@ Generate the requested project summary in clean Obsidian Markdown.`;
       const markdown = await callLLM(
         modelConfig,
         systemInstruction,
-        userPrompt
+        userPrompt,
+        undefined,
+        {
+          userId: reqUid(req),
+          kind: "synthesize",
+          allowed: !isOptedOut(req),
+          signal: clientGone.signal,
+        }
       );
 
       res.json({
@@ -1161,7 +1613,14 @@ Preserve all exact timestamps, user-shared metrics, campaign names, errors, conf
       const partial = await callLLM(
         modelConfig,
         batchExtractSystem,
-        batchExtractUser
+        batchExtractUser,
+        undefined,
+        {
+          userId: reqUid(req),
+          kind: "synthesize-extract",
+          allowed: !isOptedOut(req),
+          signal: clientGone.signal,
+        }
       );
       intermediateExtractions.push(
         `### Extracted Chronological Notes (Batch ${i + 1}/${batches.length})\n${partial}`
@@ -1178,7 +1637,14 @@ Synthesize them into a single unified project summary following the system instr
     const finalMarkdown = await callLLM(
       modelConfig,
       systemInstruction,
-      finalMergeUser
+      finalMergeUser,
+      undefined,
+      {
+        userId: reqUid(req),
+        kind: "synthesize",
+        allowed: !isOptedOut(req),
+        signal: clientGone.signal,
+      }
     );
 
     res.json({
@@ -1187,8 +1653,14 @@ Synthesize them into a single unified project summary following the system instr
       batchCount: batches.length,
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    res.status(500).json({ error: message });
+    if (!clientGone.signal.aborted) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: message });
+    } else {
+      console.log("[meta] synthesize aborted by client; Meta calls cancelled.");
+    }
+  } finally {
+    res.off("close", onClientClose);
   }
 });
 
@@ -1202,8 +1674,10 @@ async function streamLLMToSSE(
   systemPrompt: string,
   userPrompt: string,
   onDelta: (text: string) => void,
-  onStatus: (text: string) => void
+  onStatus: (text: string) => void,
+  meter?: MeterContext
 ): Promise<void> {
+  const started = Date.now();
   const apiKey = metaApiKey();
   const model = config.model.trim();
   if (!model) {
@@ -1221,6 +1695,7 @@ async function streamLLMToSSE(
       Accept: "text/event-stream",
       Authorization: `Bearer ${apiKey}`,
     },
+    signal: meter?.signal,
     body: JSON.stringify({
       model,
       instructions: systemPrompt,
@@ -1242,6 +1717,8 @@ async function streamLLMToSSE(
   let statusAcc = "";
   let textDeltas = 0;
   let statusDeltas = 0;
+  let streamUsage: { input: number; cached: number; output: number } | null =
+    null;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -1280,8 +1757,44 @@ async function streamLLMToSSE(
           json.error?.message ||
           "Meta response failed during streaming.";
         throw new Error(`Meta Model API Error: ${String(msg).slice(0, 400)}`);
+      } else if (json?.type === "response.completed") {
+        // The Responses API reports totals on completion (not per delta).
+        const u = (json.response as { usage?: unknown } | undefined)?.usage as
+          | Record<string, unknown>
+          | undefined;
+        if (u && typeof u === "object") {
+          const n = (v: unknown): number =>
+            typeof v === "number" && Number.isFinite(v) && v >= 0
+              ? Math.floor(v)
+              : 0;
+          const det = u["input_tokens_details"] as
+            | Record<string, unknown>
+            | undefined;
+          streamUsage = {
+            input: n(u["input_tokens"]),
+            cached: n(det?.["cached_tokens"]),
+            output: n(u["output_tokens"]),
+          };
+        }
       }
     }
+  }
+  if (meter && meter.allowed && streamUsage) {
+    void logMetering({
+      userId: meter.userId,
+      kind: meter.kind,
+      model,
+      backend: "meta",
+      inputTokens: streamUsage.input,
+      outputTokens: streamUsage.output,
+      durationMs: Date.now() - started,
+      costUsd: metaCostUsd(
+        model,
+        streamUsage.input,
+        streamUsage.cached,
+        streamUsage.output
+      ),
+    });
   }
   console.log(
     `[meta] stream done model=${model} textDeltas=${textDeltas} statusDeltas=${statusDeltas}` +
@@ -1295,6 +1808,19 @@ async function streamLLMToSSE(
  * the final merge so long threads still show progressive output.
  */
 app.post("/api/synthesize-thread-stream", async (req, res) => {
+  // If the browser goes away mid-stream (stop button, navigation, or a
+  // superseded StrictMode remount in dev), cancel the Meta request too.
+  // Otherwise the abandoned run keeps burning quota to completion and
+  // logs a phantom second "stream done" for a single user action.
+  const clientGone = new AbortController();
+  // NOTE: this must watch the *response*, not the request: req 'close'
+  // fires as soon as Express finishes reading the POST body, which would
+  // wrongly cancel every run. res 'close' before writableEnded means the
+  // browser actually went away.
+  const onClientClose = () => {
+    if (!res.writableEnded) clientGone.abort();
+  };
+  res.on("close", onClientClose);
   try {
     const { projectQuery, batches, systemInstruction, modelConfig } = req.body as {
       projectQuery: string;
@@ -1306,6 +1832,9 @@ app.post("/api/synthesize-thread-stream", async (req, res) => {
       res.status(400).json({ error: "No packed chat batches provided." });
       return;
     }
+
+    if (rejectDisallowedModel(res, modelConfig?.model)) return;
+
     // Defense in depth: the packer caps bodies client-side, but a stale
     // client could still send a batch the API would truncate mid-JSON
     // (cryptic 400 hex-escape error). Fail fast with a clear message.
@@ -1321,7 +1850,10 @@ app.post("/api/synthesize-thread-stream", async (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
-    const send = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    const send = (obj: unknown) => {
+      if (clientGone.signal.aborted) return;
+      res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    };
     // Flush headers and announce immediately so the UI shows life within
     // milliseconds (and no proxy buffers the stream) while the model works
     // toward its first token.
@@ -1331,7 +1863,7 @@ app.post("/api/synthesize-thread-stream", async (req, res) => {
       0
     );
     console.log(
-      `[meta] synthesize start batches=${batches.length} model=${modelConfig?.model} input≈${(inputBytes / 1024).toFixed(0)}kb`
+      `[meta] synthesize start batches=${batches.length} model=${modelConfig?.model} input≈${(inputBytes / 1024).toFixed(0)}kb topic=${JSON.stringify((projectQuery || "").slice(0, 80))}`
     );
     send({ progress: "Contacting Meta model…" });
 
@@ -1357,7 +1889,14 @@ app.post("/api/synthesize-thread-stream", async (req, res) => {
           callLLM(
             modelConfig,
             `You are extracting factual chronological project notes from Batch ${i + 1} of ${batches.length} for the project "${projectQuery}". Preserve all exact timestamps, user-shared metrics, campaign names, errors, config snippets, and decisions verbatim.`,
-            `Extract all chronological events, user prompts, metrics, and outcomes from Batch ${i + 1}:\n\n${batch}`
+            `Extract all chronological events, user prompts, metrics, and outcomes from Batch ${i + 1}:\n\n${batch}`,
+            undefined,
+            {
+              userId: reqUid(req),
+              kind: "synthesize-extract",
+              allowed: !isOptedOut(req),
+              signal: clientGone.signal,
+            }
           )
       );
       const intermediateExtractions = partials.map(
@@ -1373,11 +1912,24 @@ app.post("/api/synthesize-thread-stream", async (req, res) => {
       finalSystem,
       finalUser,
       (delta) => send({ delta }),
-      (status) => send({ progress: status })
+      (status) => send({ progress: status }),
+      {
+        userId: reqUid(req),
+        kind: "summary-stream",
+        allowed: !isOptedOut(req),
+        signal: clientGone.signal,
+      }
     );
     res.write("data: [DONE]\n\n");
     res.end();
   } catch (err: unknown) {
+    if (clientGone.signal.aborted) {
+      // The browser is gone: the Meta fetch was cancelled with it, so
+      // there is nothing to report and no completed usage to meter. This
+      // is the normal end of a stopped or superseded run, not an error.
+      console.log("[meta] synthesize aborted by client; Meta stream cancelled.");
+      return;
+    }
     const message = err instanceof Error ? err.message : String(err);
     try {
       res.write(`data: ${JSON.stringify({ error: message })}\n\n`);
@@ -1386,6 +1938,8 @@ app.post("/api/synthesize-thread-stream", async (req, res) => {
     } catch {
       if (!res.headersSent) res.status(500).json({ error: message });
     }
+  } finally {
+    res.off("close", onClientClose);
   }
 });
 
@@ -1399,6 +1953,7 @@ const VOICE_TRANSCRIBE_MODEL = "muse-voice-transcribe-1.0";
  */
 app.post("/api/voice-transcribe", async (req, res) => {
   try {
+    const started = Date.now();
     const apiKey = metaApiKey();
     if (!apiKey) {
       res.status(400).json({
@@ -1479,6 +2034,20 @@ app.post("/api/voice-transcribe", async (req, res) => {
       audioDurationMs:
         typeof data.audioDurationMs === "number" ? data.audioDurationMs : null,
     });
+    // Speech-to-text reports no token usage; log duration with zero tokens.
+    // The model has no cost-table entry, so cost is $0.
+    if (!isOptedOut(req)) {
+      void logMetering({
+        userId: reqUid(req),
+        kind: "voice-transcribe",
+        model: VOICE_TRANSCRIBE_MODEL,
+        backend: "meta",
+        inputTokens: 0,
+        outputTokens: 0,
+        durationMs: Date.now() - started,
+        costUsd: 0,
+      });
+    }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     res.status(500).json({ error: message });
@@ -1593,6 +2162,7 @@ function sanitizeVoiceMessages(raw: unknown): VoiceAgentMessage[] | null {
  */
 app.post("/api/voice-agent", async (req, res) => {
   try {
+    const started = Date.now();
     const apiKey = metaApiKey();
     if (!apiKey) {
       res.status(400).json({
@@ -1611,6 +2181,7 @@ app.post("/api/voice-agent", async (req, res) => {
       });
       return;
     }
+    if (rejectDisallowedModel(res, model)) return;
     const clean = sanitizeVoiceMessages(messages);
     if (!clean) {
       res.status(400).json({ error: "Invalid conversation messages." });
@@ -1647,6 +2218,7 @@ app.post("/api/voice-agent", async (req, res) => {
               }>;
             };
           }>;
+          usage?: Record<string, unknown>;
         };
         const msg = data.choices?.[0]?.message ?? {};
         const toolCalls = Array.isArray(msg.tool_calls)
@@ -1675,6 +2247,24 @@ app.post("/api/voice-agent", async (req, res) => {
             ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
           },
         });
+        if (!isOptedOut(req)) {
+          const usage = parseMetaUsage(data);
+          void logMetering({
+            userId: reqUid(req),
+            kind: "voice-agent",
+            model: (typeof model === "string" ? model.trim() : ""),
+            backend: "meta",
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            durationMs: Date.now() - started,
+            costUsd: metaCostUsd(
+              typeof model === "string" ? model.trim() : "",
+              usage.inputTokens,
+              usage.cachedInputTokens,
+              usage.outputTokens
+            ),
+          });
+        }
         return;
       }
       const errText = await resp.text();

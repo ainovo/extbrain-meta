@@ -39,6 +39,7 @@ interface Props {
   onSelectDay: (dayKey: string) => void;
   uuid: string;
   timeZone: string;
+  onViewTerms: () => void;
 }
 
 function abbreviateUuid(uuid: string): string {
@@ -48,7 +49,7 @@ function abbreviateUuid(uuid: string): string {
 
 const ITEMS: Array<{ id: Exclude<SidebarView, "settings">; label: string; icon: any; hint: string }> = [
   { id: "top", label: "Top of Mind", icon: Brain, hint: "Two-week overview" },
-  { id: "load", label: "Load", icon: Upload, hint: "Import Takeout JSON" },
+  { id: "load", label: "Import", icon: Upload, hint: "Import Takeout JSON" },
   { id: "threads", label: "Threads", icon: MessagesSquare, hint: "Resume source threads" },
   { id: "archive", label: "Archive", icon: Archive, hint: "All chats + entity search" },
   { id: "topics", label: "Tags", icon: Hash, hint: "Auto-tag chats" },
@@ -124,6 +125,7 @@ function SidebarBody({
   onSelectDay,
   uuid,
   timeZone,
+  onViewTerms,
   onCloseDrawer,
 }: Omit<Props, "mobileOpen" | "onCloseMobile"> & { onCloseDrawer?: () => void }) {
   const [historiesOpen, setHistoriesOpen] = useState(true);
@@ -289,6 +291,18 @@ function SidebarBody({
               {shortUuid.slice(0, 1) || "E"}
             </span>
           </button>
+          <button
+            type="button"
+            title="Terms of Use & Privacy Notice"
+            aria-label="Terms of Use & Privacy Notice"
+            onClick={() => {
+              onCloseDrawer?.();
+              onViewTerms();
+            }}
+            className="p-2 rounded-xl transition text-mention hover:bg-tag hover:text-ink"
+          >
+            <FileText className="w-4 h-4" />
+          </button>
           </div>
         ) : (
           <div className="flex items-center gap-2.5 rounded-xl px-2 py-2 w-full">
@@ -326,6 +340,17 @@ function SidebarBody({
         )}
         {!collapsed && (
           <div className="px-2 pt-1.5 text-center text-[10px] leading-relaxed text-mention/60">
+            <button
+              type="button"
+              onClick={() => {
+                onCloseDrawer?.();
+                onViewTerms();
+              }}
+              className="underline hover:text-mention transition"
+            >
+              Terms of Use &amp; Privacy Notice
+            </button>
+            <br />
             Proudly built 100% by Meta Muse Code
             <br />
             for{" "}

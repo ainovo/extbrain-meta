@@ -4,3 +4,9 @@ dist
 .env
 *.md
 *.py
+# ~1.4GB local NER weights: never needed in the image (Cloud Run pins the
+# Modal backend, which loads nothing from disk). Keeps build context small.
+models/
+# Local-only artifacts.
+.venv/
+tsconfig.tsbuildinfo

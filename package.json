@@ -8,9 +8,10 @@
     "dev:client": "vite --port 5173",
     "dev:server": "tsx watch server/index.ts",
     "build": "tsc -b && vite build",
+    "build:cloudrun": "tsc -b && vite build --mode cloudrun",
     "prepare:ner": "python3 scripts/prepare_xlm_ner.py",
     "start": "tsx server/index.ts",
-    "test": "tsx tests/test_parser_packer.ts && tsx tests/test_voice_endpoint.ts && tsx tests/test_tag_filter_display.ts && tsx tests/test_modal_backends.ts"
+    "test": "tsx tests/test_parser_packer.ts && tsx tests/test_voice_endpoint.ts && tsx tests/test_tag_filter_display.ts && tsx tests/test_modal_backends.ts && tsx tests/test_auto_start.ts && tsx tests/test_rate_limit.ts && tsx tests/test_metering_costs.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",
@@ -20,6 +21,7 @@
     "jszip": "^3.10.2",
     "lucide-react": "^0.475.0",
     "marked": "^15.0.12",
+    "mongodb": "^7.8.0",
     "pako": "^1.0.11",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

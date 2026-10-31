@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Loader2, Play, Plus, Sparkles, X } from "lucide-react";
 import { ModelEndpointConfig, ParsedActivityItem } from "../lib/types";
+import { apiPost } from "../lib/api";
 import { buildEntryClassificationText } from "../lib/retrievalEngine";
 import {
   TagDef,
@@ -109,10 +110,9 @@ export const Tagging: React.FC<TaggingProps> = ({
     setError(null);
     setDraft(null);
     try {
-      const resp = await fetch("/api/generate-nli-labels", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectQuery: text, modelConfig: discoveryModel }),
+      const resp = await apiPost("/api/generate-nli-labels", {
+        projectQuery: text,
+        modelConfig: discoveryModel,
       });
       if (!resp.ok) {
         const errData = await resp.json().catch(() => ({}));
@@ -171,15 +171,14 @@ export const Tagging: React.FC<TaggingProps> = ({
         const slice = queue.slice(i, i + MICRO_BATCH);
         let resp: Response;
         try {
-          resp = await fetch("/api/classify-batch", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+          resp = await apiPost(
+            "/api/classify-batch",
+            {
               items: slice.map((s) => ({ id: s.id, text: s.text })),
               labels: allLabels,
-            }),
-            signal: controller.signal,
-          });
+            },
+            { signal: controller.signal }
+          );
         } catch (e: any) {
           if (controller.signal.aborted || e?.name === "AbortError") {
             return { scores, completed: false };

@@ -1,4 +1,5 @@
 import { normalizeEntityKey, type ChatEntityMap } from "./entities";
+import { apiPost } from "./api";
 import { dayKeyOf, filterItemsByRange } from "./topOfMind";
 import type { ParsedActivityItem } from "./types";
 
@@ -267,12 +268,7 @@ export async function transcribeVoiceClip(
   audioBase64: string,
   signal?: AbortSignal
 ): Promise<string> {
-  const resp = await fetch("/api/voice-transcribe", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ audioBase64 }),
-    signal,
-  });
+  const resp = await apiPost("/api/voice-transcribe", { audioBase64 }, { signal });
   if (!resp.ok) throw new Error(await readApiError(resp, "Transcription failed"));
   const data = (await resp.json()) as { transcript?: unknown };
   return typeof data.transcript === "string" ? data.transcript.trim() : "";
@@ -478,12 +474,7 @@ async function voiceAgentStep(
   messages: VoiceMessage[],
   signal?: AbortSignal
 ): Promise<{ content: string | null; toolCalls: VoiceToolCall[] }> {
-  const resp = await fetch("/api/voice-agent", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages }),
-    signal,
-  });
+  const resp = await apiPost("/api/voice-agent", { model, messages }, { signal });
   if (!resp.ok) throw new Error(await readApiError(resp, "Voice agent failed"));
   const data = (await resp.json()) as VoiceAgentResponse;
   const msg = data.message ?? { content: null };

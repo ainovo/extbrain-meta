@@ -3,6 +3,7 @@ import {
   MAX_API_BODY_BYTES,
   packItemsIntoBatches,
 } from "./retrievalEngine";
+import { apiPost } from "./api";
 
 export interface SynthesisPlan {
   batches: string[];
@@ -145,17 +146,16 @@ export async function streamSynthesis({
   onProgress,
 }: SynthesisStreamOptions): Promise<string> {
   const { batches } = planSynthesis(items, maxTokensPerBatch);
-  const resp = await fetch("/api/synthesize-thread-stream", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  const resp = await apiPost(
+    "/api/synthesize-thread-stream",
+    {
       projectQuery: templateName,
       batches,
       systemInstruction,
       modelConfig,
-    }),
-    signal,
-  });
+    },
+    { signal }
+  );
   if (!resp.ok || !resp.body) {
     const errData = await resp.json().catch(() => ({}));
     throw new Error(

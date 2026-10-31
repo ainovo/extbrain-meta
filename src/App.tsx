@@ -52,6 +52,15 @@ import { DateRangePicker } from "./components/DateRangePicker";
 import { TopOfMind } from "./components/TopOfMind";
 import { UrlPreviewLayer } from "./components/UrlPreviewLayer";
 import { VoiceAssistant } from "./components/VoiceAssistant";
+import { OnboardingModal } from "./components/OnboardingModal";
+import { TermsModal } from "./components/TermsModal";
+import {
+  LOCKED_NER_BACKEND,
+  LOCKED_NLI_BACKEND,
+  MODELS_LOCKED,
+  lockedMetaEndpoint,
+} from "./lib/edition";
+import { logConsent, logVisit } from "./lib/api";
 
 const MODEL_KEY = "takeout_summarizer_model_config_v1";
 
@@ -124,19 +133,34 @@ export const App: React.FC = () => {
     end: string;
   } | null>(null);
   const [focusedThread, setFocusedThread] = useState<string | null>(null);
+  const [onboardingDone, setOnboardingDone] = useState(false);
+  const [termsOpen, setTermsOpen] = useState(false);
 
   const [modelConfig, setModelConfig] = useState<DualModelConfig>(() => {
+    let initial = DEFAULT_MODEL_CONFIG;
     try {
       const saved = localStorage.getItem(MODEL_KEY);
       if (saved) {
         // normalizeModelConfig also migrates pre-Meta stored configs
-        return normalizeModelConfig({
+        initial = normalizeModelConfig({
           ...DEFAULT_MODEL_CONFIG,
           ...JSON.parse(saved),
         });
       }
     } catch { /* ignore */ }
-    return DEFAULT_MODEL_CONFIG;
+    // Locked builds (e.g. Cloud Run) pin the model choices: a stored config
+    // from an unlocked session can never drift off the fixed values.
+    if (MODELS_LOCKED) {
+      initial = {
+        ...initial,
+        discovery: lockedMetaEndpoint(),
+        synthesis: lockedMetaEndpoint(),
+        voice: lockedMetaEndpoint(),
+        nerBackend: LOCKED_NER_BACKEND,
+        nliBackend: LOCKED_NLI_BACKEND,
+      };
+    }
+    return initial;
   });
 
   const timeZone = useMemo(() => {
@@ -146,6 +170,12 @@ export const App: React.FC = () => {
       return "local";
     }
   }, []);
+
+  // Tell the server this user visited (updates last-visited; no-op
+  // without MONGODB_URI, never blocks the UI).
+  useEffect(() => {
+    logVisit();
+  }, [uuid]);
 
   // Hydrate persisted histories for this uuid (survives app updates)
   useEffect(() => {
@@ -451,6 +481,7 @@ export const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-canvas text-ink flex">
       <Sidebar
+        onViewTerms={() => setTermsOpen(true)}
         collapsed={collapsed}
         onToggleCollapse={() => setCollapsed((v) => !v)}
         mobileOpen={mobileOpen}
@@ -526,7 +557,7 @@ export const App: React.FC = () => {
             <div className="space-y-6">
               <div>
                 <h2 className="text-lg sm:text-2xl font-bold tracking-tight text-ink leading-tight">
-                  Load Chats
+                  Import Chats
                 </h2>
                 <p className="text-[13px] text-mention mt-1">
                   Import chat exports, then process them for search and tags.
@@ -741,6 +772,18 @@ export const App: React.FC = () => {
       </div>
 
       <UrlPreviewLayer />
+      {termsOpen && <TermsModal onClose={() => setTermsOpen(false)} />}
+      {hydrated && items.length === 0 && !onboardingDone && (
+        <OnboardingModal
+          onContinue={() => {
+            logConsent(new Date().toISOString());
+            setOnboardingDone(true);
+            setView("load");
+            window.scrollTo(0, 0);
+          }}
+          onViewTerms={() => setTermsOpen(true)}
+        />
+      )}
       {view === "top" && (
         <VoiceAssistant
           items={items}

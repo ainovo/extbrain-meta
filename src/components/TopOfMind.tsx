@@ -430,6 +430,13 @@ function ActivityChart({
   };
 
   const pickTemplate = (tpl: PromptTemplate) => {
+    // Same template already generating for this panel: the in-flight run
+    // IS this request (same selection + template), so a second pick would
+    // only abort it and rebill an identical stream. Ignore the duplicate.
+    if (retroOpen && tpl.id === templateId && panelStatus === "generating") {
+      setMenuOpen(false);
+      return;
+    }
     setTemplateId(tpl.id);
     setMenuOpen(false);
     // The picker always generates, even when a summary already exists.
@@ -1342,10 +1349,10 @@ export const TopOfMind: React.FC<{
         </h2>
         <EmptyState
           title="Nothing here yet"
-          sub="Load your chat exports and this page will surface your recent activity, top threads, and most-mentioned people, places, and organizations."
+          sub="Import your chat exports and this page will surface your recent activity, top threads, and most-mentioned people, places, and organizations."
           action={
             <GhostButton onClick={() => onNavigate("load")}>
-              Load chats <ArrowRight className="w-3.5 h-3.5" />
+              Import chats <ArrowRight className="w-3.5 h-3.5" />
             </GhostButton>
           }
         />

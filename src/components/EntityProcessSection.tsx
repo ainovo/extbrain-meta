@@ -16,6 +16,7 @@ import {
   ProcessQueueItem,
   buildProcessQueuesAsync,
   processRunner,
+  shouldAutoStartProcessing,
 } from "../lib/processRunner";
 import {
   ChatEntityHashMap,
@@ -234,6 +235,12 @@ export const EntityProcessSection: React.FC<Props> = ({
   // this section only starts/stops and mirrors progress. Chats whose text
   // changed (re-import) or which predate the running processor version are
   // (re-)processed; unchanged chats keep their entities and category tags.
+  // Refs for the auto-start effect below (declared here so stop() can opt
+  // out of it).
+  const mountSigRef = useRef<string | null>(null);
+  const lastSigRef = useRef<string>("");
+  const autoStartedSigRef = useRef<string | null>(null);
+  const userStoppedRef = useRef(false);
   const start = (
     baseMap: ChatEntityMap = entityMap,
     baseHashes: ChatEntityHashMap = hashes,
@@ -262,7 +269,10 @@ export const EntityProcessSection: React.FC<Props> = ({
     });
   };
 
-  const stop = () => processRunner.stop();
+  const stop = () => {
+    userStoppedRef.current = true;
+    processRunner.stop();
+  };
 
   const clearAndRestart = () => {
     if (job.status === "running") return;
@@ -277,6 +287,43 @@ export const EntityProcessSection: React.FC<Props> = ({
     onCategoriesChange({});
     start({}, {}, {});
   };
+
+  // Auto-start after a fresh import: when the dataset signature changes
+  // post-mount (new chats arrived) and pending work exists, kick off
+  // processing once the backend version and queues resolve. A manual Stop
+  // opts out until the next import; the mount-time dataset never starts
+  // itself (returning visitors press play deliberately).
+  const datasetSig =
+    items.length === 0
+      ? ""
+      : `${uuid}:${items.length}:${items[0].id}:${items[items.length - 1].id}`;
+  useEffect(() => {
+    if (mountSigRef.current === null) {
+      mountSigRef.current = datasetSig;
+      lastSigRef.current = datasetSig;
+      return;
+    }
+    if (datasetSig !== lastSigRef.current) {
+      lastSigRef.current = datasetSig;
+      userStoppedRef.current = false;
+    }
+    if (
+      shouldAutoStartProcessing({
+        hasChats: datasetSig !== "" && datasetSig !== mountSigRef.current,
+        active: job.status === "running" && job.uuid === uuid,
+        userStopped: userStoppedRef.current,
+        serverReady: serverVersion !== null,
+        blocked: modalBlocked,
+        queuesReady: pendingQueues !== null,
+        pendingCount,
+        alreadyStarted: autoStartedSigRef.current === datasetSig,
+      })
+    ) {
+      autoStartedSigRef.current = datasetSig;
+      start();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetSig, job.status, job.uuid, serverVersion, modalBlocked, pendingQueues, pendingCount]);
 
   // A run for another dataset must not drive this section's UI (briefly
   // possible while a dataset switch stops the orphaned run).
@@ -312,16 +359,7 @@ export const EntityProcessSection: React.FC<Props> = ({
     <section aria-label="Process chats" className="space-y-4">
       <SectionHeader
         title="Process chats"
-        sub={
-          <>
-            Finds people, organizations, and places with{" "}
-            {nerBackend === "local" ? "on-device XLM-R NER" : "Modal XLM-R NER"}{" "}
-            for mention search and highlights, then tags each thread with one
-            of {taxonomy.length}{" "}
-            {taxonomy.length === 1 ? "category" : "categories"} for Top
-            Threads. Newest first, keeps running when you switch pages.
-          </>
-        }
+        sub="Finds the people, places, and organizations mentioned in your chats so you can search for them, then labels each conversation with a topic for Top Threads. Runs newest first and keeps going in the background while you browse other pages."
       />
 
       {modalBlocked && !active && (

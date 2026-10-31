@@ -1,0 +1,23 @@
+# Cloud Build config for the locked Cloud Run bundle.
+# `gcloud run deploy --source` cannot pass Docker build args, so build the
+# image with this file first, then deploy with --image (see README commands).
+# Override the region/repo at submit time, e.g.:
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_REPO=extbrain .
+# NOTE: substitution defaults below must be literal values — Cloud Build does
+# not allow one substitution to reference another, so the image path is
+# composed in the steps/images sections instead.
+substitutions:
+  _REGION: us-central1
+  _REPO: extbrain
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'BUILD_MODE=build:cloudrun'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/extbrain:latest'
+      - '.'
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/extbrain:latest'
