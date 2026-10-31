@@ -601,6 +601,26 @@ body {
   font-size: 0.9rem;
 }
 
+.flip-word {
+  display: inline-block;
+  color: var(--action);
+}
+
+.flip-word.flip {
+  animation: flip-in 0.45s ease;
+}
+
+@keyframes flip-in {
+  from {
+    opacity: 0;
+    transform: translateY(55%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* ---- summary demo ---- */
 .summary-demo {
   display: flex;
@@ -1090,7 +1110,8 @@ body {
   .mic-wrap.live .mic-ring,
   .wave.live span,
   .voice-q .caret::after,
-  .sum-caret::after {
+  .sum-caret::after,
+  .flip-word.flip {
     animation: none;
   }
 

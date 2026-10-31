@@ -2,7 +2,7 @@
 "use strict";
 
 /** Hosted ExtBrain app URL. */
-const APP_URL = "https://extbrain.ai";
+const APP_URL = "https://extbrain.app";
 
 const SECTIONS = [
   { id: "chats", label: "Chats" },
@@ -302,15 +302,15 @@ function playChatsChart() {
 const TAG_ROWS = [
   {
     chat: "“How should we price the annual plan?”",
-    tags: ["#pricing", "#myhoros"],
+    tags: ["pricing", "myhoros"],
   },
   {
     chat: "“Draft the onboarding email for new users.”",
-    tags: ["#onboarding"],
+    tags: ["onboarding"],
   },
   {
     chat: "“Which ad channel had the best ROAS?”",
-    tags: ["#paid-acquisition", "#reporting"],
+    tags: ["paid-acquisition", "reporting"],
   },
 ];
 const TAG_TOTAL = 1247;
@@ -530,6 +530,10 @@ function playActivityDemo() {
   });
   box.appendChild(list);
 
+  const flip = document.getElementById("activity-flip");
+  const words = ACTIVITY_ROWS.map((r) => r.tag.slice(1));
+  flip.textContent = words[0];
+
   if (reduceMotion) {
     for (const s of segs) s.classList.add("in");
     for (const r of rowEls) r.classList.add("in");
@@ -546,6 +550,17 @@ function playActivityDemo() {
       250 + i * 220
     );
   });
+  // Flip the title word through every category before autoplay moves on.
+  let wi = 0;
+  later("activity", () => {
+    every("activity", () => {
+      wi = (wi + 1) % words.length;
+      flip.classList.remove("flip");
+      void flip.offsetWidth;
+      flip.textContent = words[wi];
+      flip.classList.add("flip");
+    }, 800);
+  }, 600);
 }
 
 // ---- section 5 demo: one-click summaries (mirrors ThreadSummary) ----
@@ -798,11 +813,11 @@ function step(dir) {
 
 // ---- autoplay: advance a few seconds after each animation ends, looping ----
 // Per-section delay = animation end + ~3s pause (chats ≈4.2s, voice ≈3s,
-// activity ≈2.6s, tags ≈3.2s, summary ≈4.7s).
+// tags ≈3.2s, summary ≈4.7s; activity ≈7s for the full title flip cycle).
 const AUTOPLAY_AFTER = {
   chats: 7500,
   voice: 6000,
-  activity: 6000,
+  activity: 8500,
   tags: 6500,
   summary: 8000,
 };
