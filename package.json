@@ -11,7 +11,7 @@
     "build:cloudrun": "tsc -b && vite build --mode cloudrun",
     "prepare:ner": "python3 scripts/prepare_xlm_ner.py",
     "start": "tsx server/index.ts",
-    "test": "tsx tests/test_parser_packer.ts && tsx tests/test_voice_endpoint.ts && tsx tests/test_tag_filter_display.ts && tsx tests/test_modal_backends.ts && tsx tests/test_auto_start.ts && tsx tests/test_rate_limit.ts && tsx tests/test_metering_costs.ts"
+    "test": "tsx tests/test_parser_packer.ts && tsx tests/test_voice_endpoint.ts && tsx tests/test_tag_filter_display.ts && tsx tests/test_modal_backends.ts && tsx tests/test_auto_start.ts && tsx tests/test_rate_limit.ts && tsx tests/test_metering_costs.ts && VITE_LOCK_MODELS=1 VITE_LOCKED_META_MODEL=muse-spark-1.3-contributor VITE_LOCKED_NER_BACKEND=modal VITE_LOCKED_NLI_BACKEND=modal tsx tests/test_locked_edition.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",

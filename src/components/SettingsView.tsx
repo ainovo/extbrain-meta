@@ -798,8 +798,6 @@ export const SettingsView: React.FC<Props> = ({ uuid, config, onChange, entityMa
                 Downloads histories, summaries, tags, entities, templates, and
                 settings as{" "}
                 <code className="font-mono">{exportFileName(uuid)}</code>.
-                The Meta API key stays in the server .env and is never
-                included.
               </div>
               {exportError && (
                 <div className="text-xs text-mention mt-1">

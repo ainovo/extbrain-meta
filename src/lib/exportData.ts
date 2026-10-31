@@ -9,6 +9,10 @@ import {
   ParsedActivityItem,
   PromptTemplate,
 } from "./types";
+import {
+  applyLockedModelConfig,
+  sanitizeModelConfigForExport,
+} from "./edition";
 import { loadHistories, saveHistories } from "./storage";
 import {
   SavedSummary,
@@ -99,9 +103,13 @@ export async function buildExportZip(payload: ExportPayload): Promise<Blob> {
   zip.file("thread-categories.json", dump(payload.categories));
   zip.file("thread-taxonomy.json", dump(payload.taxonomy));
   zip.file("custom-templates.json", dump(payload.templates));
-  // No secrets live in the model config (the key stays in the server
-  // .env), so it exports as-is.
-  zip.file("model-config.json", dump(payload.modelConfig));
+  // Locked deployments strip deployment-fixed settings (model pickers and
+  // backend pickers disabled on the Settings page); unlocked builds export
+  // the config as-is.
+  zip.file(
+    "model-config.json",
+    dump(sanitizeModelConfigForExport(payload.modelConfig))
+  );
   zip.file(
     "manifest.json",
     dump({
@@ -172,6 +180,8 @@ function normalizeEndpoint(raw: unknown): ModelEndpointConfig {
 /**
  * Validates a stored model config; also migrates pre-Meta configs
  * (browser localStorage and old backups) to Meta-only endpoints.
+ * Locked deployments pin the deployment-fixed settings, so an unlocked
+ * backup can never drift a cloud client off its fixed models/backends.
  */
 export function normalizeModelConfig(raw: unknown): DualModelConfig {
   const r = isRecord(raw) ? raw : {};
@@ -194,7 +204,7 @@ export function normalizeModelConfig(raw: unknown): DualModelConfig {
     typeof r.nerScoreFloor === "number" && r.nerScoreFloor >= 0
       ? r.nerScoreFloor
       : undefined;
-  return {
+  const normalized: DualModelConfig = {
     useSameModel: r.useSameModel !== false,
     discovery: normalizeEndpoint(r.discovery),
     synthesis: normalizeEndpoint(r.synthesis),
@@ -217,6 +227,7 @@ export function normalizeModelConfig(raw: unknown): DualModelConfig {
         ? Math.min(Math.max(Math.round(r.mentionMinChats), 1), 50)
         : 4,
   };
+  return applyLockedModelConfig(normalized);
 }
 
 /**
@@ -336,8 +347,9 @@ export interface RestoreResult {
 
 /**
  * Writes a parsed backup over one user's stores (full replace). The
- * validated histories JSON is stored verbatim (no re-serialize). The model
- * config carries no secrets, so the backup's takes effect directly.
+ * validated histories JSON is stored verbatim (no re-serialize). Locked
+ * deployments re-pin the deployment-fixed settings so an unlocked backup
+ * can never drift a cloud client off its fixed models/backends.
  * Callers refresh React state from the result.
  */
 export async function restoreBackup(
@@ -345,7 +357,9 @@ export async function restoreBackup(
   backup: ParsedBackup,
   onStage?: (stage: string) => void
 ): Promise<RestoreResult> {
-  const modelConfig: DualModelConfig = backup.modelConfig;
+  const modelConfig: DualModelConfig = applyLockedModelConfig(
+    backup.modelConfig
+  );
   onStage?.("Saving chats…");
   await saveHistories(
     uuid,

@@ -1,5 +1,6 @@
 import {
   DEFAULT_CONTRIBUTOR_MODEL,
+  type DualModelConfig,
   type ModelEndpointConfig,
   type NerBackendId,
   type NliBackendId,
@@ -77,4 +78,47 @@ export const LOCKED_NLI_BACKEND: NliBackendId = lockedBackend(
 /** Fixed Meta endpoint for discovery/synthesis/voice in locked builds. */
 export function lockedMetaEndpoint(): ModelEndpointConfig {
   return { provider: "meta", model: LOCKED_META_MODEL };
+}
+
+/**
+ * Locked (Cloud Run) settings, mirroring the disabled controls on the
+ * Settings page: model pickers (discovery/synthesis/voice), the NER/NLI
+ * backend pickers, and the metering toggle (forced on, not in the model
+ * config). Export/import must not carry these: they are deployment-fixed.
+ */
+const LOCKED_CONFIG_KEYS = [
+  "discovery",
+  "synthesis",
+  "voice",
+  "nerBackend",
+  "nliBackend",
+] as const;
+
+/** Overwrites deployment-fixed settings with the locked values. No-op unless locked. */
+export function applyLockedModelConfig(
+  config: DualModelConfig
+): DualModelConfig {
+  if (!MODELS_LOCKED) return config;
+  return {
+    ...config,
+    discovery: lockedMetaEndpoint(),
+    synthesis: lockedMetaEndpoint(),
+    voice: lockedMetaEndpoint(),
+    nerBackend: LOCKED_NER_BACKEND,
+    nliBackend: LOCKED_NLI_BACKEND,
+  };
+}
+
+/**
+ * Portable subset for `model-config.json`: drops deployment-fixed settings
+ * when locked so a cloud export never carries them. Unlocked builds export
+ * the config as-is.
+ */
+export function sanitizeModelConfigForExport(
+  config: DualModelConfig
+): Record<string, unknown> {
+  if (!MODELS_LOCKED) return { ...config };
+  const portable: Record<string, unknown> = { ...config };
+  for (const key of LOCKED_CONFIG_KEYS) delete portable[key];
+  return portable;
 }
