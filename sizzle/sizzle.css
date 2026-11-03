@@ -280,6 +280,59 @@
   text-decoration: underline;
 }
 
+/* ---- background music toggle ---- */
+.music-btn {
+  border: 1px solid var(--divider);
+  background: var(--surface);
+  color: var(--mention);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.music-btn:hover {
+  color: var(--ink);
+  border-color: var(--mention);
+}
+
+.music-btn[aria-pressed="false"] {
+  opacity: 0.55;
+}
+
+/* ---- click-to-play overlay (unlocks sound, starts reel in sync) ---- */
+.sz-start {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(250, 250, 250, 0.85);
+}
+
+.sz-start[hidden] {
+  display: none;
+}
+
+.sz-start-btn {
+  border: none;
+  background: var(--action);
+  color: #fff;
+  border-radius: 999px;
+  padding: 16px 32px;
+  font-size: 1.05rem;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 12px 32px rgba(0, 100, 224, 0.35);
+}
+
+.sz-start-btn:hover {
+  background: var(--action-hover);
+}
+
 @media (max-width: 560px) {
   .sz-scene {
     min-height: calc(100vh - 140px);

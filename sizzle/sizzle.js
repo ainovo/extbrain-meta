@@ -1,7 +1,9 @@
 // ExtBrain sizzle reel: full-screen scenes, client-side only.
 "use strict";
 
+// Play order: cold open on the logo (9), then problem → features → CTA.
 const SCENES = [
+  { id: "9", label: "Intro" },
   { id: "1", label: "Conversation" },
   { id: "2", label: "Familiar?" },
   { id: "3", label: "Remember?" },
@@ -10,7 +12,6 @@ const SCENES = [
   { id: "6", label: "Brief" },
   { id: "7", label: "Summaries" },
   { id: "8", label: "Voice" },
-  { id: "9", label: "Intro" },
   { id: "10", label: "CTA" },
 ];
 
@@ -623,12 +624,85 @@ const PLAYERS = {
   9: playScene10,
 };
 
+// ---- background music (locked to the scene clock) ----
+let wantMusic = true;
+let sceneTs = 0;
+
+function musicEl() {
+  return document.getElementById("sz-music");
+}
+
+// Position in the reel for the current scene, in seconds.
+function reelPos() {
+  return (OFFSETS[current] ?? 0) + (performance.now() - sceneTs) / 1000;
+}
+
+function tryPlay() {
+  const audio = musicEl();
+  if (!audio || !wantMusic || !audio.paused) return;
+  audio.play().catch(() => {});
+}
+
+// Pin the track to the reel so a late start or toggle can never drift.
+function syncMusic() {
+  const audio = musicEl();
+  if (!audio || !current || audio.readyState < 1) return;
+  const target = Math.min(reelPos(), (audio.duration || Infinity) - 0.05);
+  try {
+    if (target >= 0 && Math.abs(audio.currentTime - target) > 0.5) {
+      audio.currentTime = target;
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function initMusic() {
+  const audio = musicEl();
+  const btn = document.getElementById("music-btn");
+  if (!audio || !btn) return;
+  audio.volume = 0.35;
+  audio.preload = "auto";
+  try {
+    audio.load();
+  } catch {
+    /* ignore */
+  }
+  // The reel starts on first tap, which is the gesture that unlocks sound.
+  for (const evt of ["pointerdown", "keydown", "touchend"]) {
+    document.addEventListener(
+      evt,
+      () => {
+        if (!started) startReel();
+        else tryPlay();
+      },
+      { passive: true }
+    );
+  }
+  btn.addEventListener("click", () => {
+    wantMusic = !wantMusic;
+    btn.setAttribute("aria-pressed", String(wantMusic));
+    if (wantMusic) {
+      syncMusic();
+      tryPlay();
+    } else audio.pause();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) audio.pause();
+    else if (started) tryPlay();
+  });
+  audio.addEventListener("error", () => {
+    wantMusic = false;
+    btn.setAttribute("aria-pressed", "false");
+  });
+}
+
 // ---- scene framework (mirrors docs autoplay) ----
 let current = null;
 
 // Per-scene delay = animation end + hold before advancing.
 const AUTOPLAY_AFTER = {
-  1: 13000,
+  1: 12000,
   2: 3200,
   3: 3000,
   4: 3400,
@@ -639,6 +713,16 @@ const AUTOPLAY_AFTER = {
   9: 5200,
   10: 6000,
 };
+// Scene-start offsets in seconds, in play order (music sync anchor).
+const OFFSETS = (() => {
+  const o = {};
+  let acc = 0;
+  for (const s of SCENES) {
+    o[s.id] = acc;
+    acc += (AUTOPLAY_AFTER[s.id] ?? 6000) / 1000;
+  }
+  return o;
+})();
 let autoplayId = 0;
 
 function dots() {
@@ -653,6 +737,7 @@ function updateDots() {
 }
 
 function show(id, push = true) {
+  const prev = current;
   if (current) {
     document.getElementById(`scene-${current}`).hidden = true;
     clearTimers(current);
@@ -668,7 +753,15 @@ function show(id, push = true) {
   }
   updateDots();
   if (PLAYERS[id]) PLAYERS[id]();
+  sceneTs = performance.now();
   scheduleAutoplay(id);
+  // Only pin music on natural forward play (autoplay or single step):
+  // scrubbing the dots leaves the background bed untouched.
+  const prevIdx = SCENES.findIndex((s) => s.id === prev);
+  const natural =
+    prev !== null && SCENES[(prevIdx + 1) % SCENES.length].id === id;
+  if (natural) syncMusic();
+  tryPlay();
 }
 
 function step(dir) {
@@ -683,9 +776,17 @@ function scheduleAutoplay(id) {
 }
 
 function pickInitial() {
-  const hash = window.location.hash.replace("#", "");
-  if (SCENES.some((s) => s.id === hash)) return hash;
-  return "1";
+  // Every load (including refresh) starts from the beginning.
+  return SCENES[0].id;
+}
+
+let started = false;
+
+function startReel() {
+  if (started) return;
+  started = true;
+  document.getElementById("sz-start")?.setAttribute("hidden", "");
+  show(pickInitial(), false);
 }
 
 function init() {
@@ -698,19 +799,33 @@ function init() {
     d.dataset.scene = s.id;
     d.title = `Scene ${s.id}: ${s.label}`;
     d.setAttribute("aria-label", `Show scene ${s.id}: ${s.label}`);
-    d.addEventListener("click", () => show(s.id));
+    d.addEventListener("click", () => {
+      if (!started) startReel();
+      else show(s.id);
+    });
     dotBox.appendChild(d);
   }
+  document.getElementById("sz-start-btn")?.addEventListener("click", startReel);
   document.addEventListener("keydown", (e) => {
+    if (!started) {
+      startReel();
+      return;
+    }
     if (e.key === "ArrowLeft") step(-1);
     else if (e.key === "ArrowRight" || e.key === " ") {
       e.preventDefault();
       step(1);
     }
   });
-  show(pickInitial(), false);
+  initMusic();
+  // Drop any incoming hash so a refresh visibly restarts the reel.
+  // Scenes stay hidden until the first tap starts reel + music together.
   try {
-    history.replaceState(null, "", `#${current}`);
+    history.replaceState(
+      null,
+      "",
+      window.location.pathname + window.location.search
+    );
   } catch {
     /* ignore */
   }
