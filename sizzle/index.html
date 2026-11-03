@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ExtBrain — sizzle reel</title>
+  <meta
+    name="description"
+    content="ExtBrain sizzle: AI amnesia, and the local cure that remembers everything."
+  />
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./sizzle.css" />
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+</head>
+<body>
+  <main class="stage sizzle">
+    <!-- Scene 1: the conversation -->
+    <section class="pitch sz-scene" id="scene-1" data-scene="1" hidden>
+      <div class="demo-card sz-chat">
+        <div class="demo-head sz-head-right">
+          <span>You · just now</span>
+        </div>
+        <div class="sz-bubble sz-user"><span id="sz-user-text"></span><span class="sz-caret" aria-hidden="true"></span></div>
+        <div class="demo-head" id="sz-ai-head">
+          <span>AI · seconds later</span>
+        </div>
+        <div class="sz-bubble sz-ai" id="sz-ai-bubble"><span id="sz-ai-text"></span><span class="sz-caret" aria-hidden="true"></span></div>
+      </div>
+    </section>
+
+    <!-- Scene 2: title -->
+    <section class="pitch sz-scene sz-title" id="scene-2" data-scene="2" hidden>
+      <h1><span class="sz-hl">AI amnesia,</span><br />look familiar?</h1>
+    </section>
+
+    <!-- Scene 3: flipping categories -->
+    <section class="pitch sz-scene" id="scene-3" data-scene="3" hidden>
+      <h1 class="sz-fixed">
+        Did you remember you chatted with them about
+        <span class="flip-word" id="sz-flip">utilities</span>?
+      </h1>
+    </section>
+
+    <!-- Scene 4: title -->
+    <section class="pitch sz-scene sz-title" id="scene-4" data-scene="4" hidden>
+      <h1>What if you have an <span class="sz-hl">extended brain</span> that remembers everything?</h1>
+    </section>
+
+    <!-- Scene 5: auto-tagging (same animation as docs section 3) -->
+    <section class="pitch sz-scene" id="scene-5" data-scene="5" hidden>
+      <h1>It tags your chats automatically</h1>
+      <div class="demo-card">
+        <div class="tags-demo" id="sz-tags-demo" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <!-- Scene 6: daily brief -->
+    <section class="pitch sz-scene" id="scene-6" data-scene="6" hidden>
+      <h1>It gives you a daily brief</h1>
+      <div class="demo-card">
+        <div class="demo-head">
+          <span id="sz-brief-head">Your daily brief</span>
+        </div>
+        <div class="brief-demo" id="sz-brief-demo" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <!-- Scene 7: instant summaries (same animation as docs section 5) -->
+    <section class="pitch sz-scene" id="scene-7" data-scene="7" hidden>
+      <h1>Get instant TL;DRs, reports, action items, you name it.</h1>
+      <div class="demo-card">
+        <div class="summary-demo" id="sz-summary-demo" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <!-- Scene 8: voice Q&A (same animation as docs section 4) -->
+    <section class="pitch sz-scene" id="scene-8" data-scene="8" hidden>
+      <h1>Ask months of chats anything, out loud.</h1>
+      <div class="demo-card">
+        <div class="voice-demo" id="sz-voice-demo" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <!-- Scene 9: Introducing ExtBrain -->
+    <section class="pitch sz-scene sz-title" id="scene-9" data-scene="9" hidden>
+      <h1 class="sz-intro">
+        Introducing
+        <span class="sz-logo-line">
+          <svg
+            id="sz-logo"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#0064E0"
+            stroke-width="1.75"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <g id="sz-logo-left">
+              <path
+                d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"
+              />
+            </g>
+            <g id="sz-logo-right">
+              <path
+                d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"
+              />
+            </g>
+          </svg>
+          <span>ExtBrain</span>
+        </span>
+      </h1>
+      <p class="sz-tagline" id="sz-tagline">the local, anti-RAG cure for AI amnesia.</p>
+    </section>
+
+    <!-- Scene 10: CTA -->
+    <section class="pitch sz-scene sz-title" id="scene-10" data-scene="10" hidden>
+      <h1>Try it now at <a class="sz-url" href="https://extbrain.ai">extbrain.ai</a></h1>
+    </section>
+
+    <nav class="pager" aria-label="Scenes">
+      <div class="dots" id="pager-dots" role="tablist"></div>
+    </nav>
+  </main>
+
+  <script src="./sizzle.js"></script>
+</body>
+</html>

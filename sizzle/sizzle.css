@@ -1,0 +1,304 @@
+/* Sizzle reel — same design language as docs (styles.css tokens). */
+
+.sizzle {
+  justify-content: center;
+}
+
+.sz-scene {
+  justify-content: center;
+  min-height: calc(100vh - 110px);
+}
+
+.sz-scene h1 {
+  max-width: 24ch;
+}
+
+.sz-hl {
+  color: var(--action);
+}
+
+/* ---- unboxed demos: no cards, page background shows through ---- */
+.sizzle .demo-card {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+  max-width: 760px;
+}
+
+.sizzle .demo-head {
+  margin-bottom: 12px;
+}
+
+.sz-head-right {
+  justify-content: flex-end;
+}
+
+/* Scene 1: conversation — AI turn fades in when it starts replying. */
+.sz-chat {
+  gap: 10px;
+}
+
+#sz-ai-head {
+  margin-top: 14px;
+}
+
+#sz-ai-head,
+#sz-ai-bubble {
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+#sz-ai-head.in,
+#sz-ai-bubble.in {
+  opacity: 1;
+}
+
+/* Inner rows were designed for white cards; lift them onto the page. */
+.sizzle .tag-row {
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(31, 36, 40, 0.06);
+}
+
+.sizzle .voice-q {
+  background: var(--surface);
+  border: 1px solid var(--divider);
+}
+
+/* ---- scenes 1–2: chat bubbles ---- */
+.sz-chat {
+  max-width: 720px;
+  margin: 0 auto;
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.sz-bubble {
+  border-radius: 14px;
+  padding: 16px 20px;
+  font-size: clamp(1.05rem, 2.4vw, 1.5rem);
+  line-height: 1.55;
+  min-height: 3.2em;
+}
+
+.sz-user {
+  background: var(--tag);
+  border: 1px solid var(--divider);
+  align-self: flex-end;
+  border-bottom-right-radius: 4px;
+  max-width: 90%;
+  text-align: right;
+}
+
+.sz-ai {
+  background: var(--surface);
+  border: 1px solid var(--divider);
+  align-self: flex-start;
+  border-bottom-left-radius: 4px;
+  max-width: 95%;
+}
+
+.sz-ai .hl {
+  color: var(--action);
+  font-weight: 700;
+}
+
+.sz-caret::after {
+  content: "▍";
+  color: var(--action);
+  animation: blink 0.7s steps(1) infinite;
+}
+
+.sz-caret.done::after {
+  content: "";
+  animation: none;
+}
+
+/* ---- scene 4: fixed text, flipping word ---- */
+.sz-fixed {
+  max-width: 26ch;
+}
+
+/* Fixed-width slot: only the word changes, the sentence never reflows. */
+.sz-fixed .flip-word {
+  display: inline-block;
+  width: 13ch;
+  text-align: center;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+/* ---- scene 7: daily brief ---- */
+.brief-demo {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px 2px 4px;
+  min-height: 300px;
+}
+
+.brief-date {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.brief-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.brief-stat {
+  background: var(--surface);
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+
+.brief-stat.in {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.brief-stat strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.brief-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.brief-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  opacity: 0;
+  transform: translateX(-18px);
+  transition: opacity 0.35s ease,
+    transform 0.4s cubic-bezier(0.22, 0.9, 0.3, 1);
+}
+
+.brief-list li.in {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.brief-count {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--mention);
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.brief-count.in {
+  opacity: 1;
+}
+
+/* ---- scene 10: logo assembly ---- */
+.sz-intro {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35em;
+}
+
+.sz-logo-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  white-space: nowrap;
+}
+
+#sz-logo {
+  width: clamp(56px, 10vw, 96px);
+  height: clamp(56px, 10vw, 96px);
+}
+
+#sz-logo-left,
+#sz-logo-right {
+  opacity: 0;
+  transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.22, 0.9, 0.3, 1);
+}
+
+#sz-logo-left {
+  transform: translateX(-18px);
+}
+
+#sz-logo-right {
+  transform: translateX(18px);
+}
+
+#sz-logo-left.in,
+#sz-logo-right.in {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.sz-tagline {
+  font-size: clamp(1.1rem, 2.6vw, 1.6rem);
+  color: var(--mention);
+  margin: 8px 0 0;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+}
+
+.sz-tagline.in {
+  opacity: 1;
+}
+
+/* ---- scene 11 ---- */
+.sz-url {
+  color: var(--action);
+  text-decoration: none;
+}
+
+.sz-url:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 560px) {
+  .sz-scene {
+    min-height: calc(100vh - 140px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sz-caret::after {
+    animation: none;
+  }
+
+  #sz-logo-left,
+  #sz-logo-right,
+  .sz-tagline,
+  .brief-stat,
+  .brief-list li,
+  .brief-count,
+  #sz-ai-head,
+  #sz-ai-bubble {
+    transition: none;
+  }
+}
